@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mattersim_dt"
+version = "0.1.0"
+description = "MatterSim Digital Twin Project"
+authors = [
+  { name="MyName", email="myemail@example.com" },
+]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "ase",
+    "torch",
+    "mp-api"
+]
+
+# [매우 중요] src 폴더 안에 코드가 있다고 알려주는 설정
+[tool.setuptools.packages.find]
+where = ["src"]

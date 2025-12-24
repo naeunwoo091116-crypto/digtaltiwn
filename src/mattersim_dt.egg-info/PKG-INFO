@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: mattersim_dt
+Version: 0.1.0
+Summary: MatterSim Digital Twin Project
+Author-email: MyName <myemail@example.com>
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy
+Requires-Dist: ase
+Requires-Dist: torch
+Requires-Dist: mp-api
