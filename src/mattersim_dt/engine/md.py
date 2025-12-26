@@ -1,5 +1,6 @@
 from ase import Atoms, units
-from ase.md.langevin import Langevin
+# Langevin 대신 NPT 임포트
+from ase.md.npt import NPT 
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 from ase.io import Trajectory
 import os
@@ -42,6 +43,8 @@ class MDSimulator:
         return results
 
     def run(self, atoms: Atoms, temperature: float, steps: int, time_step: float = 1.0, save_interval: int = 10):
+       
+
         """
         MD 시뮬레이션 실행 (NVT 앙상블: 입자수, 부피, 온도 고정)
 
@@ -63,12 +66,14 @@ class MDSimulator:
 
         # 3. MD 엔진 설정 (Langevin Dynamics 사용)
         # Langevin은 외부 열원(Heat Bath)과 상호작용하여 온도를 일정하게 유지해줍니다.
-        dyn = Langevin(
+        dyn = NPT(
             atoms,
-            timestep=time_step * units.fs, # 1 femtosecond
+            timestep=time_step * units.fs,
             temperature_K=temperature,
-            friction=0.002, # 마찰 계수 (온도 조절용)
-            trajectory=None # 여기서는 직접 핸들링
+            externalstress=0.0,           # 외부 압력 0 (대기압 상태)
+            ttime=25.0 * units.fs,        # 온도 조절 시상수 (작을수록 강하게 조절)
+            pfactor=75.0 * units.GPa,     # 압력 조절 계수 (부피 변화 허용)
+            trajectory=None
         )
 
         # 4. 결과 저장 설정

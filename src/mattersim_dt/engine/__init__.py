@@ -4,4 +4,5 @@ from .calculator import get_calculator, MatterSimLoader
 from .relax import StructureRelaxer
 from .md import MDSimulator
 from .batch_relax import BatchStructureRelaxer
+from .batch_md import BatchMDSimulator
 from .parallel_system import ParallelSystemRunner

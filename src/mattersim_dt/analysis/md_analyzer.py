@@ -16,10 +16,7 @@ class MDAnalyzer:
 
     def analyze(self):
         """
-        Trajectory 파일을 읽고 열적 물성을 분석
-
-        Returns:
-            dict: 분석 결과
+        Trajectory 파일을 읽고 열적 물성을 분석 (초기 20% 평형화 구간 제외)
         """
         try:
             # Trajectory 파일 읽기
@@ -28,17 +25,30 @@ class MDAnalyzer:
             if len(self.traj) == 0:
                 return {"error": "Empty trajectory"}
 
-            # 1. 에너지 분석
+            # ---------------------------------------------------------
+            # [수정안 2 적용] 초기 20% 프레임 건너뛰기 (Equilibration 제외)
+            # ---------------------------------------------------------
+            total_frames = len(self.traj)
+            skip_frames = int(total_frames * 0.2)  # 앞부분 20% 계산
+            analyzed_traj = self.traj[skip_frames:] # 분석에 사용할 구간 슬라이싱
+            
+            if len(analyzed_traj) == 0:
+                analyzed_traj = self.traj # 혹시 데이터가 너무 적으면 전체 사용
+            # ---------------------------------------------------------
+
+            # 1. 에너지 및 온도 분석
             energies = []
             temperatures = []
 
-            for atoms in self.traj:
+            # self.traj 대신 analyzed_traj를 사용하여 반복문 실행
+            for atoms in analyzed_traj:
                 if atoms.calc is None:
                     continue
 
                 try:
                     epot = atoms.get_potential_energy()
                     ekin = atoms.get_kinetic_energy()
+                    # 온도 계산 (K)
                     temp = ekin / (1.5 * len(atoms) * units.kB)
 
                     energies.append(epot)
@@ -49,10 +59,9 @@ class MDAnalyzer:
             if not energies:
                 return {"error": "No energy data available"}
 
-            # 2. 구조 변화 분석 (RDF - 동경 분포 함수는 계산 비용이 크므로 생략)
-            # 대신 원자 간 평균 거리 변화를 추적
-            final_atoms = self.traj[-1]
-            initial_atoms = self.traj[0]
+            # 2. 구조 변화 분석
+            final_atoms = analyzed_traj[-1]
+            initial_atoms = self.traj[0] # 부피 변화는 '최초' 구조와 비교해야 하므로 self.traj[0] 유지
 
             # 초기 대비 최종 구조의 부피 변화율
             volume_change = (final_atoms.get_volume() - initial_atoms.get_volume()) / initial_atoms.get_volume() * 100
@@ -68,13 +77,13 @@ class MDAnalyzer:
             energy_per_atom_mean = energy_mean / len(final_atoms)
             energy_per_atom_std = energy_std / len(final_atoms)
 
-            # 5. 구조 안정성 판정 (간단한 기준)
-            # - 온도 변동이 5% 이하
-            # - 부피 변화가 10% 이하
-            is_thermally_stable = (temp_fluctuation < 5.0) and (abs(volume_change) < 10.0)
+            # 5. 구조 안정성 판정 (수정안 1의 완화된 기준 적용)
+            # 온도 변동 10%, 부피 변화 15%로 기준 완화
+            is_thermally_stable = (temp_fluctuation < 10.0) and (abs(volume_change) < 15.0)
 
             results = {
-                "trajectory_frames": len(self.traj),
+                "trajectory_frames": len(analyzed_traj),
+                "total_frames_original": total_frames,
                 "avg_temperature": temp_mean,
                 "temperature_std": temp_std,
                 "temperature_fluctuation_percent": temp_fluctuation,

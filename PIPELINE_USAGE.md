@@ -135,23 +135,32 @@ MDSimulator.run_multi_temperature(atoms, temperatures, steps)
 ### 🔀 데이터 흐름
 
 ```
-CSV 파일 (auto_mining_results_final.csv)
-  ↓
-원소 조합 추출 (Al-Li, Cu-Ni, ...)
-  ↓
-[각 조합마다]
-  ↓
-  [Phase 1] 구조 생성 → 이완 → relaxed_structures{}
-  ↓
-  [Phase 2] 안정성 분석 → stable_formulas[]
-  ↓
-  [Phase 3] MD 시뮬레이션 → 물성 계산
-  ↓
-detailed_data[] (CSV 저장용)
-  ↓
-pipeline_results_YYYYMMDD_HHMMSS.csv
-```
-
+src/mattersim_dt/
+├── core/
+│   ├── __init__.py          # SimConfig 노출
+│   └── config.py            # 설정 관리 (Trajectory 저장 옵션 추가)
+│
+├── builder/
+│   ├── __init__.py          # RandomAlloyMixer 노출
+│   ├── mixer.py             # 합금 구조 생성
+│   ├── prototypes.py        # 프로토타입 구조
+│   └── supercell.py         # 슈퍼셀 생성
+│
+├── engine/
+│   ├── __init__.py          # get_calculator, StructureRelaxer, MDSimulator, BatchStructureRelaxer 노출
+│   ├── calculator.py        # MatterSim Calculator
+│   ├── relax.py             # 구조 이완 (화학식 기반 trajectory 저장)
+│   ├── md.py                # 분자동역학 시뮬레이션 (화학식 기반 trajectory 저장)
+│   └── batch_relax.py       # 배치 구조 이완 (병렬 처리)
+│
+├── analysis/
+│   ├── __init__.py          # StabilityAnalyzer, MDAnalyzer 노출
+│   ├── stability.py         # 열역학적 안정성 분석
+│   └── md_analyzer.py       # MD Trajectory 분석
+│
+└── miner/
+    ├── __init__.py          # MaterialMiner 노출
+    └── mp_api.py            # Materials Project API
 ---
 
 ## ⚙️ 설정 방법

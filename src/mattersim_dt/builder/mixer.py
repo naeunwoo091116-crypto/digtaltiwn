@@ -67,13 +67,12 @@ class RandomAlloyMixer:
         # 2. 기본 뼈대(Primitive Cell) 생성
         try:
             if a is not None:
-                self.base_atoms = bulk(base_element, structure, a=a)
+                # cubic=True를 추가하여 원자 4개(FCC 기준) 단위로 생성
+                self.base_atoms = bulk(base_element, structure, a=a, cubic=True)
             else:
-                self.base_atoms = bulk(base_element, structure)
+                self.base_atoms = bulk(base_element, structure, cubic=True)
         except Exception as e:
-            # ASE가 실패하면 fcc 구조로 기본 격자 상수와 함께 재시도
-            print(f"⚠️  {base_element}의 구조 생성 실패, fcc 구조로 대체 (a=4.0)")
-            self.base_atoms = bulk(base_element, 'fcc', a=4.0)
+            self.base_atoms = bulk(base_element, 'fcc', a=4.0, cubic=True)
             
     def generate_structure(self, dopant_element: str, ratio: float, supercell_size: int = 4) -> Atoms:
         """

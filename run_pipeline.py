@@ -11,6 +11,9 @@ from mattersim_dt.builder import RandomAlloyMixer
 from mattersim_dt.engine import get_calculator, StructureRelaxer, MDSimulator
 from mattersim_dt.analysis import StabilityAnalyzer, MDAnalyzer
 
+import torch
+print(f"🔍 PyTorch GPU Available: {torch.cuda.is_available()}")
+print(f"🔍 Current Device Name: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None'}")
 # ============================================================================
 # CSV 중간 저장 함수
 # ============================================================================
@@ -116,7 +119,8 @@ def run_experiment_for_pair(element_A, element_B, calc, relaxer, md_sim):
         try:
             # RandomAlloyMixer 사용 (자동으로 격자 상수 선택)
             mixer = RandomAlloyMixer(el)
-            atoms = mixer.base_atoms
+            # base_atoms 대신 generate_structure를 사용하여 슈퍼셀 확보 (ratio=0)
+            atoms = mixer.generate_structure(el, ratio=0.0, supercell_size=SimConfig.SUPERCELL_SIZE)
             atoms.calc = calc
 
             # StructureRelaxer 사용
@@ -283,110 +287,73 @@ def run_experiment_for_pair(element_A, element_B, calc, relaxer, md_sim):
     # -------------------------------------------------------------------------
     # [Phase 3] MD 시뮬레이션 (MDSimulator 사용)
     # -------------------------------------------------------------------------
-    print("\n=== [Phase 3] 분자동역학 시뮬레이션 (안정 구조만) ===")
+    print("\n=== [Phase 3] 분자동역학 시뮬레이션 (안정 구조만 - 배치 처리) ===")
 
     md_count = 0
 
     if not stable_formulas:
         print("   ℹ️  안정한 구조가 없어 MD를 건너뜁니다.")
     else:
-        print(f"   🔥 {len(stable_formulas)}개 구조에 대해 열 테스트 수행")
+        print(f"   🔥 {len(stable_formulas)}개 구조에 대해 배치 MD 수행")
 
+        # 1. MD 대상 구조들을 리스트로 모으기
+        atoms_to_md = []
+        valid_formulas = [] # 분석 시 매칭을 위해 수집된 화학식 리스트
+        
         for formula in stable_formulas:
-            print(f"\n   🔹 {formula} - MD 시작 ({SimConfig.MD_TEMPERATURE}K)")
-
             atoms = relaxed_structures.get(formula)
-
             if atoms is None:
-                print(f"     ⚠️  구조를 찾을 수 없습니다. 건너뜁니다.")
                 continue
-
-            # MD를 위해 슈퍼셀 크기 조정
-            if len(atoms) < 20:
+            
+            # MD를 위해 슈퍼셀 크기 조정 (최소 200개 이상 권장)
+            if len(atoms) < 200:
+                # (2,2,2) 확장이 너무 크면 (2,2,1) 등으로 조절 가능
                 atoms = atoms * (2, 2, 2)
-                print(f"     ℹ️  슈퍼셀 확장: {len(atoms)} atoms")
+            
+            atoms_to_md.append(atoms)
+            valid_formulas.append(formula)
 
-            try:
-                if SimConfig.PARALLEL_MD_TEMPERATURES:
-                    # 다중 온도 병렬 MD
-                    print(f"     🔥 다중 온도 MD: {SimConfig.MD_TEMPERATURE_RANGE}")
-                    md_results_list = md_sim.run_multi_temperature(
-                        atoms,
-                        temperatures=SimConfig.MD_TEMPERATURE_RANGE,
-                        steps=SimConfig.MD_STEPS,
-                        save_interval=50
-                    )
+        try:
+            # 2. BatchMDSimulator 생성 및 실행
+            from mattersim_dt.engine import BatchMDSimulator
+            # SimConfig에 설정된 RATIO_BATCH_SIZE(예: 4)만큼 GPU에서 동시에 계산합니다.
+            batch_md_sim = BatchMDSimulator(calc, batch_size=SimConfig.RATIO_BATCH_SIZE)
+            
+            traj_files = batch_md_sim.run_batch(
+                atoms_to_md,
+                temperature=SimConfig.MD_TEMPERATURE,
+                steps=SimConfig.MD_STEPS,
+                save_interval=50
+            )
 
-                    # 각 온도별 분석
-                    for temp, final_atoms, traj_file in md_results_list:
-                        print(f"\n     🔍 {temp}K MD 물성 분석 중...")
-                        md_analyzer = MDAnalyzer(traj_file)
-                        md_results = md_analyzer.analyze()
+            # 3. 생성된 Trajectory 파일들을 순회하며 분석
+            for formula, traj_file in zip(valid_formulas, traj_files):
+                print(f"\n   🔹 {formula} - MD 결과 분석 중...")
+                
+                md_analyzer = MDAnalyzer(traj_file)
+                md_results = md_analyzer.analyze()
 
-                        if "error" not in md_results:
-                            md_analyzer.print_summary(md_results)
-
-                            # CSV에 온도별 데이터 추가 (새로운 행으로)
-                            # 기존 detailed_data 복사해서 온도만 다르게
-                            for data in detailed_data:
-                                if data['formula'] == formula:
-                                    # 첫 번째 온도는 기존 행 업데이트
-                                    if temp == SimConfig.MD_TEMPERATURE_RANGE[0]:
-                                        data['md_performed'] = True
-                                        data['md_avg_temperature'] = md_results.get('avg_temperature')
-                                        data['md_temp_fluctuation'] = md_results.get('temperature_fluctuation_percent')
-                                        data['md_avg_energy_per_atom'] = md_results.get('avg_energy_per_atom')
-                                        data['md_volume_change_percent'] = md_results.get('volume_change_percent')
-                                        data['md_thermally_stable'] = md_results.get('is_thermally_stable')
-                                    else:
-                                        # 추가 온도는 새로운 행 추가
-                                        new_data = data.copy()
-                                        new_data['md_performed'] = True
-                                        new_data['md_avg_temperature'] = md_results.get('avg_temperature')
-                                        new_data['md_temp_fluctuation'] = md_results.get('temperature_fluctuation_percent')
-                                        new_data['md_avg_energy_per_atom'] = md_results.get('avg_energy_per_atom')
-                                        new_data['md_volume_change_percent'] = md_results.get('volume_change_percent')
-                                        new_data['md_thermally_stable'] = md_results.get('is_thermally_stable')
-                                        detailed_data.append(new_data)
-                                    break
-
+                if "error" not in md_results:
+                    md_analyzer.print_summary(md_results)
                     md_count += 1
 
+                    # CSV 저장을 위한 detailed_data 업데이트
+                    for data in detailed_data:
+                        if data['formula'] == formula:
+                            data['md_performed'] = True
+                            data['md_avg_temperature'] = md_results.get('avg_temperature')
+                            data['md_temp_fluctuation'] = md_results.get('temperature_fluctuation_percent')
+                            data['md_avg_energy_per_atom'] = md_results.get('avg_energy_per_atom')
+                            data['md_volume_change_percent'] = md_results.get('volume_change_percent')
+                            data['md_thermally_stable'] = md_results.get('is_thermally_stable')
+                            break
                 else:
-                    # 단일 온도 MD (기존 방식)
-                    final_atoms, traj_file = md_sim.run(
-                        atoms,
-                        temperature=SimConfig.MD_TEMPERATURE,
-                        steps=SimConfig.MD_STEPS,
-                        save_interval=50
-                    )
-                    print(f"     ✓ MD 완료")
-                    md_count += 1
+                    print(f"     ⚠️  MD 분석 오류 ({formula}): {md_results['error']}")
 
-                    # MD 결과 분석
-                    print(f"     🔍 MD 물성 분석 중...")
-                    md_analyzer = MDAnalyzer(traj_file)
-                    md_results = md_analyzer.analyze()
+        except Exception as e:
+            print(f"     ❌ 배치 MD 실행 중 오류 발생: {e}")
 
-                    if "error" not in md_results:
-                        md_analyzer.print_summary(md_results)
-
-                        # MD 성공 시 detailed_data 업데이트
-                        for data in detailed_data:
-                            if data['formula'] == formula:
-                                data['md_performed'] = True
-                                data['md_avg_temperature'] = md_results.get('avg_temperature')
-                                data['md_temp_fluctuation'] = md_results.get('temperature_fluctuation_percent')
-                                data['md_avg_energy_per_atom'] = md_results.get('avg_energy_per_atom')
-                                data['md_volume_change_percent'] = md_results.get('volume_change_percent')
-                                data['md_thermally_stable'] = md_results.get('is_thermally_stable')
-                                break
-                    else:
-                        print(f"     ⚠️  MD 분석 오류: {md_results['error']}")
-
-            except Exception as e:
-                print(f"     ❌ MD 오류: {e}")
-
+    # 결과 요약 반환 (기존과 동일)
     return {
         "system": f"{element_A}-{element_B}",
         "total_structures": len(relaxed_structures),
