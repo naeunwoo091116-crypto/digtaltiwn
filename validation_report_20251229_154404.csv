@@ -1,0 +1,4 @@
+﻿exp_formula,sim_formula,sim_lattice_a,exp_lattice_a,lattice_error_pct,sim_density,exp_density,density_error_pct,accuracy_score
+Cu,Cu,3.61,3.6147,0.13,8.9717,8.96,0.13,99.87
+Ni,Ni,3.52,3.5238,0.11,8.9386,8.9,0.43,99.76
+CuNi,CuNi,3.61,3.5692,1.14,8.6292,8.93,3.37,97.97

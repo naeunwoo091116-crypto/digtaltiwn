@@ -10,7 +10,7 @@ class SimConfig:
     # ==========================================
     # 여기에 본인의 키를 붙여넣으세요.
     # (환경 변수에 설정되어 있다면 그걸 우선 사용하고, 없으면 아래 문자열을 사용합니다)
-    MP_API_KEY = os.environ.get("MP_API_KEY") or "5DPnayEkpta3vy5RiF6wNa2Am0O28x9s"
+    MP_API_KEY = "5DPnayEkpta3vy5RiF6wNa2Am0O28x9s"
 
     # ==========================================
     # 시스템 설정
@@ -23,9 +23,13 @@ class SimConfig:
 
     # Pipeline 설정
     PIPELINE_MODE = "manual"  # "auto": CSV에서 자동 로드, "manual": 수동으로 원소 지정
-    MANUAL_ELEMENT_A = "Cu"  # PIPELINE_MODE="manual"일 때만 사용
-    MANUAL_ELEMENT_B = "Ni"  # PIPELINE_MODE="manual"일 때만 사용
+    MANUAL_ELEMENT_A = "Fe"  # PIPELINE_MODE="manual"일 때만 사용
+    MANUAL_ELEMENT_B = "Cr"  # PIPELINE_MODE="manual"일 때만 사용
     MAX_SYSTEMS = None  # "auto" 모드에서 실험할 최대 시스템 수 (None이면 전체)
+
+    # Resume 설정 (이어하기 기능)
+    RESUME_MODE = True  # True: 기존 결과 있으면 건너뛰기, False: 항상 새로 계산
+    RESUME_CSV_PATH = None  # 특정 CSV 지정 (None이면 최신 파일 자동 찾기)
 
     # MD (가열 실험) 설정
     MD_TEMPERATURE = 1000.0  # 온도 (K)

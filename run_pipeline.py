@@ -9,11 +9,37 @@ from pymatgen.core import Composition
 from mattersim_dt.core import SimConfig
 from mattersim_dt.builder import RandomAlloyMixer
 from mattersim_dt.engine import get_calculator, StructureRelaxer, MDSimulator
-from mattersim_dt.analysis import StabilityAnalyzer, MDAnalyzer
+from mattersim_dt.analysis import StabilityAnalyzer, MDAnalyzer, MaterialValidator
+from mattersim_dt.miner import ExperimentalDataMiner
+import multiprocessing as mp
 
 import torch
 print(f"🔍 PyTorch GPU Available: {torch.cuda.is_available()}")
 print(f"🔍 Current Device Name: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None'}")
+# ============================================================================
+def md_worker(args):
+    """
+    별도의 프로세스에서 독립적으로 MD를 실행하는 함수
+    """
+    formula, atoms, temperature, steps, device = args
+    
+    # 중요: 각 프로세스 내에서 계산기를 새로 로드해야 GPU 충돌이 없습니다.
+    from mattersim_dt.engine import get_calculator, MDSimulator
+    
+    try:
+        calc = get_calculator(device=device)
+        md_sim = MDSimulator(calculator=calc)
+        
+        # MD 실행
+        final_atoms, traj_file = md_sim.run(
+            atoms, 
+            temperature=temperature, 
+            steps=steps,
+            save_interval=50
+        )
+        return formula, traj_file, None
+    except Exception as e:
+        return formula, None, str(e)
 # ============================================================================
 # CSV 중간 저장 함수
 # ============================================================================
@@ -30,6 +56,77 @@ def save_intermediate_csv(csv_filename, detailed_data):
     df_results = pd.DataFrame(detailed_data)
     df_results.to_csv(csv_filename, index=False, encoding='utf-8-sig')
     print(f"   💾 중간 저장 완료: {csv_filename} ({len(detailed_data)}개 구조)")
+
+# ============================================================================
+# Resume 기능: 완료된 시스템 찾기
+# ============================================================================
+def find_latest_result_csv():
+    """
+    현재 디렉토리에서 가장 최신 pipeline_results_*.csv 파일을 찾습니다.
+
+    Returns:
+        str: CSV 파일 경로 (없으면 None)
+    """
+    import glob
+    csv_files = glob.glob("pipeline_results_*.csv")
+
+    if not csv_files:
+        return None
+
+    # 파일명에서 타임스탬프 추출하여 최신 파일 찾기
+    csv_files.sort(reverse=True)  # 알파벳 역순 정렬 (타임스탬프 문자열이므로 최신이 앞으로)
+    return csv_files[0]
+
+def load_completed_systems(csv_path):
+    """
+    기존 CSV 파일에서 완료된 시스템 목록을 로드합니다.
+
+    Args:
+        csv_path: CSV 파일 경로
+
+    Returns:
+        set: 완료된 시스템 집합 (예: {"Cu-Ni", "Al-Mg"})
+    """
+    if not csv_path or not os.path.exists(csv_path):
+        return set()
+
+    try:
+        df = pd.read_csv(csv_path)
+
+        if 'system' not in df.columns:
+            print(f"   ⚠️  CSV 파일에 'system' 컬럼이 없습니다: {csv_path}")
+            return set()
+
+        completed_systems = set(df['system'].unique())
+        print(f"   📂 기존 결과 파일 발견: {csv_path}")
+        print(f"   ✅ 완료된 시스템: {len(completed_systems)}개")
+        print(f"      → {', '.join(sorted(completed_systems))}")
+
+        return completed_systems
+
+    except Exception as e:
+        print(f"   ⚠️  CSV 로드 중 오류: {e}")
+        return set()
+
+def load_existing_data(csv_path):
+    """
+    기존 CSV 파일의 상세 데이터를 로드합니다 (이어서 저장하기 위함)
+
+    Args:
+        csv_path: CSV 파일 경로
+
+    Returns:
+        list: 기존 데이터 리스트
+    """
+    if not csv_path or not os.path.exists(csv_path):
+        return []
+
+    try:
+        df = pd.read_csv(csv_path)
+        return df.to_dict('records')  # 딕셔너리 리스트로 반환
+    except Exception as e:
+        print(f"   ⚠️  기존 데이터 로드 중 오류: {e}")
+        return []
 
 # ============================================================================
 # CSV에서 원소 조합 로드 함수
@@ -262,6 +359,13 @@ def run_experiment_for_pair(element_A, element_B, calc, relaxer, md_sim):
             elements = list(comp.as_dict().keys())
             fractions = list(comp.as_dict().values())
 
+            # 격자 상수 및 밀도 추출 (검증용)
+            lattice = atoms_data.get_cell()
+            lattice_a = lattice[0][0]  # a 격자 상수 (Angstrom)
+            volume = atoms_data.get_volume()  # 부피 (Angstrom^3)
+            mass = sum(atoms_data.get_masses())  # 총 질량 (amu)
+            density = mass / volume * 1.66054  # 밀도 (g/cm^3) - amu/A^3 -> g/cm^3 변환
+
             detailed_data.append({
                 'system': f"{element_A}-{element_B}",
                 'formula': formula,
@@ -270,6 +374,8 @@ def run_experiment_for_pair(element_A, element_B, calc, relaxer, md_sim):
                 'ratio_A': fractions[0] / sum(fractions) if len(fractions) > 0 else 1.0,
                 'ratio_B': fractions[1] / sum(fractions) if len(fractions) > 1 else 0.0,
                 'total_atoms': len(atoms_data),
+                'lattice_a': round(lattice_a, 4),  # 격자 상수 a (검증용)
+                'density': round(density, 4),  # 밀도 (검증용)
                 'energy_per_atom': atoms_data.get_potential_energy() / len(atoms_data) if atoms_data.calc else None,
                 'energy_above_hull': e_hull,
                 'is_stable': is_stable,
@@ -287,57 +393,46 @@ def run_experiment_for_pair(element_A, element_B, calc, relaxer, md_sim):
     # -------------------------------------------------------------------------
     # [Phase 3] MD 시뮬레이션 (MDSimulator 사용)
     # -------------------------------------------------------------------------
-    print("\n=== [Phase 3] 분자동역학 시뮬레이션 (안정 구조만 - 배치 처리) ===")
+    print(f"\n=== [Phase 3] Multiprocessing MD 실행 (병렬 프로세스) ===")
 
     md_count = 0
-
     if not stable_formulas:
         print("   ℹ️  안정한 구조가 없어 MD를 건너뜁니다.")
     else:
-        print(f"   🔥 {len(stable_formulas)}개 구조에 대해 배치 MD 수행")
-
-        # 1. MD 대상 구조들을 리스트로 모으기
-        atoms_to_md = []
-        valid_formulas = [] # 분석 시 매칭을 위해 수집된 화학식 리스트
-        
+        # 1. 작업 리스트 준비
+        tasks = []
         for formula in stable_formulas:
             atoms = relaxed_structures.get(formula)
-            if atoms is None:
+            if atoms:
+                if len(atoms) < 200:
+                    atoms = atoms * (2, 2, 2)
+                # (화학식, 구조, 온도, 스텝, 디바이스) 튜플로 저장
+                tasks.append((formula, atoms.copy(), SimConfig.MD_TEMPERATURE, SimConfig.MD_STEPS, SimConfig.DEVICE))
+
+        # 2. 프로세스 풀 생성 및 실행
+        # 동시에 실행할 프로세스 수 (GPU 메모리에 따라 2~4 권장)
+        num_processes = min(len(tasks), 4) 
+        print(f"   🚀 {num_processes}개의 프로세스로 병렬 MD 시작...")
+
+        with mp.Pool(processes=num_processes) as pool:
+            # 병렬 실행 시작
+            results = pool.map(md_worker, tasks)
+
+        # 3. 결과 수집 및 분석
+        for formula, traj_file, error in results:
+            if error:
+                print(f"   ❌ {formula} MD 실패: {error}")
                 continue
             
-            # MD를 위해 슈퍼셀 크기 조정 (최소 200개 이상 권장)
-            if len(atoms) < 200:
-                # (2,2,2) 확장이 너무 크면 (2,2,1) 등으로 조절 가능
-                atoms = atoms * (2, 2, 2)
-            
-            atoms_to_md.append(atoms)
-            valid_formulas.append(formula)
-
-        try:
-            # 2. BatchMDSimulator 생성 및 실행
-            from mattersim_dt.engine import BatchMDSimulator
-            # SimConfig에 설정된 RATIO_BATCH_SIZE(예: 4)만큼 GPU에서 동시에 계산합니다.
-            batch_md_sim = BatchMDSimulator(calc, batch_size=SimConfig.RATIO_BATCH_SIZE)
-            
-            traj_files = batch_md_sim.run_batch(
-                atoms_to_md,
-                temperature=SimConfig.MD_TEMPERATURE,
-                steps=SimConfig.MD_STEPS,
-                save_interval=50
-            )
-
-            # 3. 생성된 Trajectory 파일들을 순회하며 분석
-            for formula, traj_file in zip(valid_formulas, traj_files):
-                print(f"\n   🔹 {formula} - MD 결과 분석 중...")
-                
+            if traj_file:
+                print(f"\n   🔹 {formula} - 결과 분석 중...")
                 md_analyzer = MDAnalyzer(traj_file)
                 md_results = md_analyzer.analyze()
-
+                
                 if "error" not in md_results:
                     md_analyzer.print_summary(md_results)
                     md_count += 1
-
-                    # CSV 저장을 위한 detailed_data 업데이트
+                    # 상세 데이터 업데이트
                     for data in detailed_data:
                         if data['formula'] == formula:
                             data['md_performed'] = True
@@ -350,8 +445,6 @@ def run_experiment_for_pair(element_A, element_B, calc, relaxer, md_sim):
                 else:
                     print(f"     ⚠️  MD 분석 오류 ({formula}): {md_results['error']}")
 
-        except Exception as e:
-            print(f"     ❌ 배치 MD 실행 중 오류 발생: {e}")
 
     # 결과 요약 반환 (기존과 동일)
     return {
@@ -360,6 +453,9 @@ def run_experiment_for_pair(element_A, element_B, calc, relaxer, md_sim):
         "stable_count": len(stable_formulas),
         "md_count": md_count
     }, detailed_data
+
+
+
 
 # ============================================================================
 # 메인 함수
@@ -375,14 +471,47 @@ def main():
     # 0. SimConfig 설정
     SimConfig.setup()
 
-    # CSV 파일명 미리 생성 (중간 저장용)
+    # -------------------------------------------------------------------------
+    # Resume 모드 체크 (기존 결과 이어하기)
+    # -------------------------------------------------------------------------
+    completed_systems = set()
+    all_detailed_data = []  # 기존 데이터를 담을 리스트
+    resume_csv = None
+
+    if SimConfig.RESUME_MODE:
+        print("\n🔄 Resume 모드 활성화: 기존 결과 확인 중...")
+
+        # 사용자가 지정한 CSV 또는 최신 CSV 찾기
+        resume_csv = SimConfig.RESUME_CSV_PATH or find_latest_result_csv()
+
+        if resume_csv:
+            completed_systems = load_completed_systems(resume_csv)
+            all_detailed_data = load_existing_data(resume_csv)
+
+            if completed_systems:
+                print(f"   ♻️  기존 결과를 이어서 진행합니다.")
+            else:
+                print(f"   ℹ️  기존 CSV 파일이 비어있거나 시스템 정보가 없습니다.")
+                resume_csv = None
+        else:
+            print(f"   ℹ️  기존 결과 파일 없음 → 처음부터 시작합니다.")
+
+    # CSV 파일명 결정
     import datetime
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_filename = f"pipeline_results_{timestamp}.csv"
-    print(f"\n💾 결과 파일: {csv_filename} (진행 중 자동 저장)")
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")  # 항상 생성 (검증용 파일명에 사용)
+
+    if resume_csv and SimConfig.RESUME_MODE and completed_systems:
+        # Resume 모드: 기존 파일 계속 사용
+        csv_filename = resume_csv
+        print(f"\n💾 결과 파일: {csv_filename} (기존 파일에 추가 저장)")
+    else:
+        # 새 파일 생성
+        csv_filename = f"pipeline_results_{timestamp}.csv"
+        print(f"\n💾 결과 파일: {csv_filename} (새 파일 생성)")
 
     print(f"\n⚙️  설정 로딩:")
     print(f"   - 파이프라인 모드: {SimConfig.PIPELINE_MODE}")
+    print(f"   - Resume 모드: {'ON (완료된 시스템 건너뛰기)' if SimConfig.RESUME_MODE else 'OFF'}")
     print(f"   - CSV 경로: {SimConfig.MINER_CSV_PATH}")
     print(f"   - 최대 시스템 수: {SimConfig.MAX_SYSTEMS}")
     print(f"   - 혼합 비율 간격: {SimConfig.MIXING_RATIO_STEP} ({len(SimConfig.get_mixing_ratios())}개 비율)")
@@ -438,7 +567,7 @@ def main():
     print()
 
     all_results = []
-    all_detailed_data = []  # 모든 상세 데이터를 모을 리스트
+    # all_detailed_data는 이미 위에서 초기화됨 (Resume 모드에서 기존 데이터 로드)
 
     if SimConfig.PARALLEL_SYSTEM_CALCULATION and SimConfig.NUM_GPUS > 1:
         # 다중 GPU 병렬 처리
@@ -447,6 +576,15 @@ def main():
         # TODO: 실제 멀티프로세싱 구현 (복잡도가 높아 일단 순차 실행)
 
         for idx, (elem_A, elem_B) in enumerate(element_pairs, 1):
+            system_name = f"{elem_A}-{elem_B}"
+
+            # Resume 모드: 이미 완료된 시스템은 건너뛰기
+            if system_name in completed_systems:
+                print(f"\n{'#'*70}")
+                print(f"# [{idx}/{len(element_pairs)}] {system_name} - ⏭️  이미 완료됨 (건너뛰기)")
+                print(f"{'#'*70}")
+                continue
+
             print(f"\n{'#'*70}")
             print(f"# [{idx}/{len(element_pairs)}] 시스템 실행 중")
             print(f"{'#'*70}")
@@ -469,6 +607,15 @@ def main():
         print(f"ℹ️  순차 모드: 시스템을 하나씩 처리합니다.\n")
 
         for idx, (elem_A, elem_B) in enumerate(element_pairs, 1):
+            system_name = f"{elem_A}-{elem_B}"
+
+            # Resume 모드: 이미 완료된 시스템은 건너뛰기
+            if system_name in completed_systems:
+                print(f"\n{'#'*70}")
+                print(f"# [{idx}/{len(element_pairs)}] {system_name} - ⏭️  이미 완료됨 (건너뛰기)")
+                print(f"{'#'*70}")
+                continue
+
             print(f"\n{'#'*70}")
             print(f"# [{idx}/{len(element_pairs)}] 시스템 실행 중")
             print(f"{'#'*70}")
@@ -494,6 +641,14 @@ def main():
     print("🎯 전체 파이프라인 실행 완료")
     print("="*70)
 
+    # Resume 통계 출력
+    if SimConfig.RESUME_MODE and completed_systems:
+        print(f"\n📊 Resume 통계:")
+        print(f"   - 기존 완료 시스템: {len(completed_systems)}개 (건너뜀)")
+        print(f"   - 신규 계산 시스템: {len(all_results)}개")
+        print(f"   - 총 시스템 수: {len(completed_systems) + len(all_results)}개")
+        print()
+
     print(f"\n{'System':<20} | {'Structures':<12} | {'Stable':<10} | {'MD Done':<10}")
     print("-" * 70)
 
@@ -509,7 +664,7 @@ def main():
             total_md += res['md_count']
 
     print("-" * 70)
-    print(f"{'TOTAL':<20} | {'':<12} | {total_stable:<10} | {total_md:<10}")
+    print(f"{'NEW TOTAL':<20} | {'':<12} | {total_stable:<10} | {total_md:<10}")
     print("="*70 + "\n")
 
     # -------------------------------------------------------------------------
@@ -530,6 +685,8 @@ def main():
         print(f"   - element_A, element_B: 개별 원소")
         print(f"   - ratio_A, ratio_B: 원소 비율 (0~1)")
         print(f"   - total_atoms: 총 원자 개수")
+        print(f"   - lattice_a: 격자 상수 a (Angstrom)")
+        print(f"   - density: 밀도 (g/cm^3)")
         print(f"   [열역학 물성]")
         print(f"   - energy_per_atom: 원자당 에너지 (eV/atom)")
         print(f"   - energy_above_hull: Convex Hull 위 에너지 (eV/atom)")
@@ -542,8 +699,107 @@ def main():
         print(f"   - md_volume_change_percent: 부피 변화율 (%)")
         print(f"   - md_thermally_stable: 열적 안정성 (True/False)")
         print("="*70 + "\n")
+
+        # -------------------------------------------------------------------------
+        # 6. 실험 데이터 가져오기 및 검증 (Validation Phase)
+        # -------------------------------------------------------------------------
+        print("\n" + "="*70)
+        print("📊 시뮬레이션-실험 데이터 검증 및 채점 시작")
+        print("="*70 + "\n")
+
+        try:
+            # [Step 6-1] Materials Project API로 실험 데이터 가져오기
+            exp_miner = ExperimentalDataMiner()
+
+            # Auto 모드: CSV에서 실제 시뮬레이션한 시스템 목록 추출
+            if SimConfig.PIPELINE_MODE == "auto":
+                print("⛏️  [Step 1/3] 시뮬레이션된 시스템 목록 확인 중...")
+                sim_df = pd.read_csv(csv_filename)
+                unique_systems = sim_df['system'].unique()
+                print(f"   📋 발견된 시스템: {', '.join(unique_systems)}")
+
+                # 각 시스템별로 실험 데이터 수집
+                all_exp_data = []
+                for system in unique_systems:
+                    elem_a, elem_b = system.split('-')
+                    print(f"\n   🔍 {system} 실험 레퍼런스 가져오는 중...")
+                    sys_exp_df = exp_miner.fetch_binary_alloy_references(elem_a, elem_b)
+                    if not sys_exp_df.empty:
+                        all_exp_data.append(sys_exp_df)
+
+                if all_exp_data:
+                    exp_df = pd.concat(all_exp_data, ignore_index=True)
+                    exp_df = exp_df.drop_duplicates(subset=['formula'])  # 중복 제거
+                else:
+                    exp_df = pd.DataFrame()
+
+            # Manual 모드: 단일 시스템만 처리
+            else:
+                print(f"⛏️  [Step 1/3] {SimConfig.MANUAL_ELEMENT_A}-{SimConfig.MANUAL_ELEMENT_B} 실험 레퍼런스 가져오는 중...")
+                exp_df = exp_miner.fetch_binary_alloy_references(
+                    SimConfig.MANUAL_ELEMENT_A,
+                    SimConfig.MANUAL_ELEMENT_B
+                )
+
+            if not exp_df.empty:
+                # 실험 데이터 CSV로 저장
+                exp_csv_path = exp_miner.save_to_csv(exp_df, f"experimental_references_{timestamp}.csv")
+
+                # [Step 6-2] Validator가 읽을 수 있는 딕셔너리 형태로 변환
+                print("\n🔄 [Step 2/3] 실험 데이터를 검증용 형식으로 변환 중...")
+                experimental_ref = {}
+
+                for _, row in exp_df.iterrows():
+                    experimental_ref[row['formula']] = {
+                        "lattice_a": row['exp_lattice_a'],
+                        "density": row['exp_density']
+                    }
+
+                print(f"   ✅ {len(experimental_ref)}개의 실험 레퍼런스 준비 완료")
+                print(f"   📋 레퍼런스 화학식: {', '.join(list(experimental_ref.keys())[:5])}...")
+
+                # [Step 6-3] MaterialValidator로 채점 수행
+                print("\n🎯 [Step 3/3] 시뮬레이션 결과 채점 중...")
+                validator = MaterialValidator(csv_filename)
+                report = validator.calculate_score(experimental_ref)
+
+                if not report.empty:
+                    # 결과 출력
+                    validator.print_summary(report)
+
+                    # 채점 결과 CSV로 저장
+                    val_filename = f"validation_report_{timestamp}.csv"
+                    report.to_csv(val_filename, index=False, encoding='utf-8-sig')
+                    print(f"\n💾 채점 리포트 저장 완료: {val_filename}")
+                    print(f"   파일 위치: {os.path.abspath(val_filename)}")
+
+                    # 상세 통계
+                    print(f"\n📈 채점 통계:")
+                    print(f"   - 검증된 구조 수: {len(report)}개")
+                    print(f"   - 평균 격자 오차: {report['lattice_error_pct'].mean():.2f}%")
+                    print(f"   - 평균 밀도 오차: {report['density_error_pct'].mean():.2f}%")
+                    print(f"   - 최고 정확도: {report['accuracy_score'].max():.2f}/100")
+                    print(f"   - 최저 정확도: {report['accuracy_score'].min():.2f}/100")
+                else:
+                    print("   ⚠️  채점 결과가 비어있습니다. 시뮬레이션과 실험 데이터의 화학식이 일치하지 않을 수 있습니다.")
+
+            else:
+                print("   ⚠️  비교할 실험 데이터를 찾지 못했습니다.")
+                print("   💡 Tip: MP API 키가 올바른지, Cu-Ni 실험 데이터가 존재하는지 확인하세요.")
+
+        except Exception as e:
+            print(f"\n❌ 채점 과정 중 오류 발생: {e}")
+            print(f"   오류 타입: {type(e).__name__}")
+            import traceback
+            print(f"   상세 정보:\n{traceback.format_exc()}")
+
+        print("\n" + "="*70)
+        print("✅ 전체 파이프라인 (시뮬레이션 + 검증) 완료!")
+        print("="*70 + "\n")
+
     else:
         print("⚠️  저장할 상세 데이터가 없습니다.\n")
 
 if __name__ == "__main__":
     main()
+    
