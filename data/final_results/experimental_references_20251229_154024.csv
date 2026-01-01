@@ -1,4 +1,0 @@
-mp_id,formula,exp_lattice_a,exp_lattice_b,exp_lattice_c,exp_density,exp_formation_energy,exp_e_above_hull,crystal_system
-MANUAL-Cu,Cu,3.6147,3.6147,3.6147,8.96,0.0,0.0,Fm-3m
-MANUAL-Ni,Ni,3.5238,3.5238,3.5238,8.9,0.0,0.0,Fm-3m
-MANUAL-CuNi,CuNi,3.5692,3.5692,3.5692,8.93,-0.015,0.0,Fm-3m

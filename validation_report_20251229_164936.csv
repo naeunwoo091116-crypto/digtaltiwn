@@ -1,0 +1,4 @@
+﻿exp_formula,sim_formula,sim_lattice_a,exp_lattice_a,lattice_error_pct,sim_density,exp_density,density_error_pct,accuracy_score
+Fe,Fe,2.87,2.8665,0.12,7.8455,7.87,0.31,99.8
+Cr,Cr,2.88,2.8846,0.16,7.2289,7.19,0.54,99.69
+FeCr,CrFe,2.87,2.8755,0.19,7.5751,7.53,0.6,99.64

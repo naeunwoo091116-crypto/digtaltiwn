@@ -17,29 +17,52 @@ import torch
 print(f"🔍 PyTorch GPU Available: {torch.cuda.is_available()}")
 print(f"🔍 Current Device Name: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None'}")
 # ============================================================================
+# MD 멀티프로세싱 Worker 함수
+# ============================================================================
 def md_worker(args):
     """
     별도의 프로세스에서 독립적으로 MD를 실행하는 함수
+
+    ⚠️ Windows 사용자 주의:
+    - config.py에서 PARALLEL_MD_EXECUTION = False로 설정하여 이 기능을 끌 수 있습니다
+    - Windows는 'spawn' 방식을 사용하므로 메모리 오버헤드가 큽니다
+    - GPU 메모리가 부족하면 프로세스 수를 줄이거나 순차 모드를 사용하세요
+
+    Linux/서버 환경:
+    - 'fork' 방식을 사용하여 효율적으로 작동합니다
+    - 다중 GPU 환경에서 큰 성능 향상을 기대할 수 있습니다
     """
     formula, atoms, temperature, steps, device = args
-    
+
     # 중요: 각 프로세스 내에서 계산기를 새로 로드해야 GPU 충돌이 없습니다.
     from mattersim_dt.engine import get_calculator, MDSimulator
-    
+    import os
+
     try:
+        # 프로세스 ID 출력 (디버깅용)
+        pid = os.getpid()
+        print(f"     [PID {pid}] {formula} MD 시작...")
+
         calc = get_calculator(device=device)
         md_sim = MDSimulator(calculator=calc)
-        
+
         # MD 실행
         final_atoms, traj_file = md_sim.run(
-            atoms, 
-            temperature=temperature, 
+            atoms,
+            temperature=temperature,
             steps=steps,
             save_interval=50
         )
+
+        print(f"     [PID {pid}] {formula} MD 완료 ✓")
         return formula, traj_file, None
+
     except Exception as e:
-        return formula, None, str(e)
+        import traceback
+        error_msg = f"{str(e)}\n{traceback.format_exc()[:200]}"
+        print(f"     [PID {pid}] {formula} MD 실패: {str(e)}")
+        return formula, None, error_msg
+
 # ============================================================================
 # CSV 중간 저장 함수
 # ============================================================================
@@ -391,59 +414,128 @@ def run_experiment_for_pair(element_A, element_B, calc, relaxer, md_sim):
     print(f"\n   📊 필터링 결과: 총 {len(stable_formulas)}개 안정 구조 발견")
 
     # -------------------------------------------------------------------------
-    # [Phase 3] MD 시뮬레이션 (MDSimulator 사용)
+    # [Phase 3] MD 시뮬레이션 (병렬/순차 선택 가능)
     # -------------------------------------------------------------------------
-    print(f"\n=== [Phase 3] Multiprocessing MD 실행 (병렬 프로세스) ===")
+    print(f"\n=== [Phase 3] MD 시뮬레이션 ===")
 
     md_count = 0
     if not stable_formulas:
         print("   ℹ️  안정한 구조가 없어 MD를 건너뜁니다.")
     else:
-        # 1. 작업 리스트 준비
-        tasks = []
-        for formula in stable_formulas:
-            atoms = relaxed_structures.get(formula)
-            if atoms:
-                if len(atoms) < 200:
-                    atoms = atoms * (2, 2, 2)
-                # (화학식, 구조, 온도, 스텝, 디바이스) 튜플로 저장
-                tasks.append((formula, atoms.copy(), SimConfig.MD_TEMPERATURE, SimConfig.MD_STEPS, SimConfig.DEVICE))
+        # =====================================================================
+        # 모드 1: 병렬 처리 (서버/Linux 환경 권장)
+        # =====================================================================
+        if SimConfig.PARALLEL_MD_EXECUTION:
+            print(f"   🚀 병렬 모드 활성화 (프로세스 수: {SimConfig.MD_NUM_PROCESSES})")
+            print(f"   ⚠️  Windows에서는 메모리 사용량이 높을 수 있습니다")
 
-        # 2. 프로세스 풀 생성 및 실행
-        # 동시에 실행할 프로세스 수 (GPU 메모리에 따라 2~4 권장)
-        num_processes = min(len(tasks), 4) 
-        print(f"   🚀 {num_processes}개의 프로세스로 병렬 MD 시작...")
+            # 1. 작업 리스트 준비
+            tasks = []
+            for formula in stable_formulas:
+                atoms = relaxed_structures.get(formula)
+                if atoms:
+                    if len(atoms) < 200:
+                        atoms = atoms * (2, 2, 2)
+                    # (화학식, 구조, 온도, 스텝, 디바이스) 튜플로 저장
+                    tasks.append((formula, atoms.copy(), SimConfig.MD_TEMPERATURE, SimConfig.MD_STEPS, SimConfig.DEVICE))
 
-        with mp.Pool(processes=num_processes) as pool:
-            # 병렬 실행 시작
-            results = pool.map(md_worker, tasks)
+            # 2. 프로세스 풀 생성 및 실행
+            num_processes = min(len(tasks), SimConfig.MD_NUM_PROCESSES)
+            print(f"   📋 총 {len(tasks)}개 구조에 대해 {num_processes}개 프로세스로 병렬 실행...")
 
-        # 3. 결과 수집 및 분석
-        for formula, traj_file, error in results:
-            if error:
-                print(f"   ❌ {formula} MD 실패: {error}")
-                continue
-            
-            if traj_file:
-                print(f"\n   🔹 {formula} - 결과 분석 중...")
-                md_analyzer = MDAnalyzer(traj_file)
-                md_results = md_analyzer.analyze()
-                
-                if "error" not in md_results:
-                    md_analyzer.print_summary(md_results)
-                    md_count += 1
-                    # 상세 데이터 업데이트
-                    for data in detailed_data:
-                        if data['formula'] == formula:
-                            data['md_performed'] = True
-                            data['md_avg_temperature'] = md_results.get('avg_temperature')
-                            data['md_temp_fluctuation'] = md_results.get('temperature_fluctuation_percent')
-                            data['md_avg_energy_per_atom'] = md_results.get('avg_energy_per_atom')
-                            data['md_volume_change_percent'] = md_results.get('volume_change_percent')
-                            data['md_thermally_stable'] = md_results.get('is_thermally_stable')
-                            break
-                else:
-                    print(f"     ⚠️  MD 분석 오류 ({formula}): {md_results['error']}")
+            with mp.Pool(processes=num_processes) as pool:
+                # 병렬 실행 시작
+                results = pool.map(md_worker, tasks)
+
+            # 3. 결과 수집 및 분석
+            print("\n   📊 병렬 MD 결과 분석 중...")
+            for formula, traj_file, error in results:
+                if error:
+                    print(f"   ❌ {formula} MD 실패: {error[:100]}...")
+                    continue
+
+                if traj_file:
+                    print(f"\n   🔹 {formula} - 결과 분석 중...")
+                    md_analyzer = MDAnalyzer(traj_file)
+                    md_results = md_analyzer.analyze()
+
+                    if "error" not in md_results:
+                        md_analyzer.print_summary(md_results)
+                        md_count += 1
+                        # 상세 데이터 업데이트
+                        for data in detailed_data:
+                            if data['formula'] == formula:
+                                data['md_performed'] = True
+                                data['md_avg_temperature'] = md_results.get('avg_temperature')
+                                data['md_temp_fluctuation'] = md_results.get('temperature_fluctuation_percent')
+                                data['md_avg_energy_per_atom'] = md_results.get('avg_energy_per_atom')
+                                data['md_volume_change_percent'] = md_results.get('volume_change_percent')
+                                data['md_thermally_stable'] = md_results.get('is_thermally_stable')
+                                break
+                    else:
+                        print(f"     ⚠️  MD 분석 오류 ({formula}): {md_results['error']}")
+
+        # =====================================================================
+        # 모드 2: 순차 처리 (Windows/안정성 우선)
+        # =====================================================================
+        else:
+            print(f"   🐢 순차 모드 활성화 (안정적, 메모리 효율적)")
+            print(f"   💡 서버 환경에서는 config.py의 PARALLEL_MD_EXECUTION = True로 설정하면 빠릅니다")
+
+            # 순차적으로 MD 실행
+            for idx, formula in enumerate(stable_formulas, 1):
+                print(f"\n   🔹 [{idx}/{len(stable_formulas)}] {formula} - MD 시뮬레이션 시작...")
+
+                atoms = relaxed_structures.get(formula)
+                if not atoms:
+                    print(f"     ⚠️  구조를 찾을 수 없습니다. 건너뜁니다.")
+                    continue
+
+                try:
+                    # 구조 크기 확인 및 확장
+                    if len(atoms) < 200:
+                        print(f"     ℹ️  구조가 작아서 2x2x2로 확장합니다 ({len(atoms)} -> {len(atoms)*8} atoms)")
+                        atoms = atoms * (2, 2, 2)
+
+                    # MD 실행
+                    final_atoms, traj_file = md_sim.run(
+                        atoms,
+                        temperature=SimConfig.MD_TEMPERATURE,
+                        steps=SimConfig.MD_STEPS,
+                        save_interval=50
+                    )
+
+                    if traj_file:
+                        # 결과 분석
+                        md_analyzer = MDAnalyzer(traj_file)
+                        md_results = md_analyzer.analyze()
+
+                        if "error" not in md_results:
+                            md_analyzer.print_summary(md_results)
+                            md_count += 1
+
+                            # 상세 데이터 업데이트
+                            for data in detailed_data:
+                                if data['formula'] == formula:
+                                    data['md_performed'] = True
+                                    data['md_avg_temperature'] = md_results.get('avg_temperature')
+                                    data['md_temp_fluctuation'] = md_results.get('temperature_fluctuation_percent')
+                                    data['md_avg_energy_per_atom'] = md_results.get('avg_energy_per_atom')
+                                    data['md_volume_change_percent'] = md_results.get('volume_change_percent')
+                                    data['md_thermally_stable'] = md_results.get('is_thermally_stable')
+                                    break
+
+                            print(f"     ✅ MD 완료 및 분석 성공")
+                        else:
+                            print(f"     ⚠️  MD 분석 오류: {md_results['error']}")
+                    else:
+                        print(f"     ⚠️  Trajectory 파일이 생성되지 않았습니다.")
+
+                except Exception as e:
+                    print(f"     ❌ MD 실행 중 오류: {e}")
+                    import traceback
+                    print(f"     상세: {traceback.format_exc()[:200]}")
+                    continue
 
 
     # 결과 요약 반환 (기존과 동일)
@@ -707,13 +799,30 @@ def main():
         print("📊 시뮬레이션-실험 데이터 검증 및 채점 시작")
         print("="*70 + "\n")
 
+        # 검증 기능이 비활성화된 경우 건너뛰기
+        if not SimConfig.ENABLE_VALIDATION:
+            print("⏭️  실험 데이터 검증 기능이 비활성화되어 있습니다.")
+            print("   (config.py의 ENABLE_VALIDATION = False)")
+            print("\n" + "="*70)
+            print("✅ 전체 파이프라인 (시뮬레이션) 완료!")
+            print("="*70 + "\n")
+            return
+
         try:
-            # [Step 6-1] Materials Project API로 실험 데이터 가져오기
+            # [Step 6-1] 실험 데이터 가져오기
             exp_miner = ExperimentalDataMiner()
 
+            # 사용자 정의 CSV 사용 모드
+            if SimConfig.CUSTOM_EXP_DATA_CSV:
+                print(f"📂 사용자 정의 실험 데이터 사용: {SimConfig.CUSTOM_EXP_DATA_CSV}")
+                exp_df = exp_miner.load_custom_csv(SimConfig.CUSTOM_EXP_DATA_CSV)
+
             # Auto 모드: CSV에서 실제 시뮬레이션한 시스템 목록 추출
-            if SimConfig.PIPELINE_MODE == "auto":
+            elif SimConfig.PIPELINE_MODE == "auto":
                 print("⛏️  [Step 1/3] 시뮬레이션된 시스템 목록 확인 중...")
+                print(f"   📊 데이터 소스: {SimConfig.VALIDATION_DATA_SOURCE}")
+                print(f"   🔬 Theoretical 포함: {SimConfig.VALIDATION_USE_THEORETICAL}")
+
                 sim_df = pd.read_csv(csv_filename)
                 unique_systems = sim_df['system'].unique()
                 print(f"   📋 발견된 시스템: {', '.join(unique_systems)}")
@@ -736,14 +845,21 @@ def main():
             # Manual 모드: 단일 시스템만 처리
             else:
                 print(f"⛏️  [Step 1/3] {SimConfig.MANUAL_ELEMENT_A}-{SimConfig.MANUAL_ELEMENT_B} 실험 레퍼런스 가져오는 중...")
+                print(f"   📊 데이터 소스: {SimConfig.VALIDATION_DATA_SOURCE}")
+                print(f"   🔬 Theoretical 포함: {SimConfig.VALIDATION_USE_THEORETICAL}")
+
                 exp_df = exp_miner.fetch_binary_alloy_references(
                     SimConfig.MANUAL_ELEMENT_A,
                     SimConfig.MANUAL_ELEMENT_B
                 )
 
             if not exp_df.empty:
-                # 실험 데이터 CSV로 저장
-                exp_csv_path = exp_miner.save_to_csv(exp_df, f"experimental_references_{timestamp}.csv")
+                # 실험 데이터 CSV로 저장 (설정에 따라)
+                if SimConfig.VALIDATION_SAVE_EXP_DATA:
+                    exp_csv_path = exp_miner.save_to_csv(exp_df, f"experimental_references_{timestamp}.csv")
+                    print(f"   💾 실험 데이터 저장: {exp_csv_path}")
+                else:
+                    print("   ⏭️  실험 데이터 CSV 저장 건너뜀 (VALIDATION_SAVE_EXP_DATA = False)")
 
                 # [Step 6-2] Validator가 읽을 수 있는 딕셔너리 형태로 변환
                 print("\n🔄 [Step 2/3] 실험 데이터를 검증용 형식으로 변환 중...")
@@ -767,11 +883,14 @@ def main():
                     # 결과 출력
                     validator.print_summary(report)
 
-                    # 채점 결과 CSV로 저장
-                    val_filename = f"validation_report_{timestamp}.csv"
-                    report.to_csv(val_filename, index=False, encoding='utf-8-sig')
-                    print(f"\n💾 채점 리포트 저장 완료: {val_filename}")
-                    print(f"   파일 위치: {os.path.abspath(val_filename)}")
+                    # 채점 결과 CSV로 저장 (설정에 따라)
+                    if SimConfig.VALIDATION_SAVE_REPORT:
+                        val_filename = f"validation_report_{timestamp}.csv"
+                        report.to_csv(val_filename, index=False, encoding='utf-8-sig')
+                        print(f"\n💾 채점 리포트 저장 완료: {val_filename}")
+                        print(f"   파일 위치: {os.path.abspath(val_filename)}")
+                    else:
+                        print("\n⏭️  채점 리포트 CSV 저장 건너뜀 (VALIDATION_SAVE_REPORT = False)")
 
                     # 상세 통계
                     print(f"\n📈 채점 통계:")
@@ -801,5 +920,43 @@ def main():
         print("⚠️  저장할 상세 데이터가 없습니다.\n")
 
 if __name__ == "__main__":
+    # =========================================================================
+    # Windows 안전 가드: multiprocessing 사용 시 필수 설정
+    # =========================================================================
+    # freeze_support: PyInstaller 등으로 패키징할 때 필요
+    mp.freeze_support()
+
+    # set_start_method: 프로세스 시작 방식 설정
+    # - 'spawn' (Windows 기본): 새 Python 인터프리터 시작 (안전하지만 느림)
+    # - 'fork' (Linux 기본): 부모 프로세스 복제 (빠르지만 Windows 미지원)
+    # - 'forkserver' (Unix 전용): 서버 프로세스를 통해 fork
+    import sys
+    if sys.platform == "win32":
+        # Windows: spawn 강제 사용
+        try:
+            mp.set_start_method('spawn', force=True)
+        except RuntimeError:
+            pass  # 이미 설정된 경우 무시
+
+        # Windows 사용자에게 병렬 처리 경고
+        if SimConfig.PARALLEL_MD_EXECUTION:
+            print("\n" + "="*70)
+            print("⚠️  Windows에서 MD 병렬 처리가 활성화되어 있습니다!")
+            print("   - 메모리 사용량이 매우 높을 수 있습니다")
+            print("   - GPU 메모리 부족 시 프로그램이 멈출 수 있습니다")
+            print("   - 안정성을 위해 config.py에서 PARALLEL_MD_EXECUTION = False 권장")
+            print("="*70 + "\n")
+
+            import time
+            print("5초 후 실행합니다... (Ctrl+C로 중단 가능)")
+            time.sleep(5)
+    else:
+        # Linux/Mac: fork 사용 가능
+        try:
+            mp.set_start_method('fork', force=True)
+        except RuntimeError:
+            pass
+
+    # 메인 함수 실행
     main()
     

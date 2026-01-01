@@ -23,17 +23,20 @@ class SimConfig:
 
     # Pipeline 설정
     PIPELINE_MODE = "manual"  # "auto": CSV에서 자동 로드, "manual": 수동으로 원소 지정
-    MANUAL_ELEMENT_A = "Fe"  # PIPELINE_MODE="manual"일 때만 사용
-    MANUAL_ELEMENT_B = "Cr"  # PIPELINE_MODE="manual"일 때만 사용
+    MANUAL_ELEMENT_A = "Fe"  # PIPELINE_MODE="manual"일 때만 사용 (예: "Cu", "Al", "Fe" 등)
+    MANUAL_ELEMENT_B = "Cr"  # PIPELINE_MODE="manual"일 때만 사용 (예: "Ni", "Mg", "Cr" 등)
     MAX_SYSTEMS = None  # "auto" 모드에서 실험할 최대 시스템 수 (None이면 전체)
+
+    # ⚠️ 중요: Windows에서는 아래 병렬 옵션을 모두 False로 설정하는 것을 권장합니다
+    # GPU 메모리 경합과 multiprocessing 충돌로 시스템이 멈출 수 있습니다
 
     # Resume 설정 (이어하기 기능)
     RESUME_MODE = True  # True: 기존 결과 있으면 건너뛰기, False: 항상 새로 계산
-    RESUME_CSV_PATH = None  # 특정 CSV 지정 (None이면 최신 파일 자동 찾기)
+    RESUME_CSV_PATH = "pipeline_results_20251229_132400.csv"  # 특정 CSV 지정 (None이면 최신 파일 자동 찾기)
 
     # MD (가열 실험) 설정
     MD_TEMPERATURE = 1000.0  # 온도 (K)
-    MD_STEPS = 5000         # 스텝 수
+    MD_STEPS = 5000         # 스텝 수 (권장: 테스트 1000, 실제 5000-10000)
     MD_TIMESTEP = 1.0        # 시간 간격 (fs)
 
     # Trajectory 저장 설정
@@ -42,6 +45,18 @@ class SimConfig:
 
     # 필터링 기준
     STABILITY_THRESHOLD = 0.05
+
+    # 검증 및 채점 설정
+    ENABLE_VALIDATION = False  # True: 실험 데이터 비교 및 채점 수행, False: 건너뛰기
+    VALIDATION_SAVE_EXP_DATA = False  # True: 실험 데이터 CSV 저장, False: 저장 안 함
+    VALIDATION_SAVE_REPORT = False  # True: 채점 리포트 CSV 저장, False: 저장 안 함
+
+    # 실험 데이터 소스 설정
+    VALIDATION_DATA_SOURCE = "materials_project"  # "materials_project": MP API 사용, "literature": 문헌 데이터만 사용, "auto": MP 시도 후 실패 시 문헌
+    VALIDATION_USE_THEORETICAL = False  # Materials Project에서 theoretical 데이터 포함 여부 (False: 실험 데이터만)
+
+    # 사용자 정의 실험 데이터 (선택사항)
+    CUSTOM_EXP_DATA_CSV = None  # CSV 파일 경로 지정 시 해당 파일의 실험 데이터 사용 (None이면 기본 소스 사용)
 
     # 구조 생성 설정
     MIXING_RATIO_STEP = 0.1  # 혼합 비율 간격 (0.1 = 10%씩, 0.05 = 5%씩)
@@ -56,12 +71,18 @@ class SimConfig:
     RATIO_BATCH_SIZE = 4  # 한 번에 계산할 비율 개수 (GPU 메모리에 따라 조절)
 
     # 2. 시스템별 병렬 계산 (여러 원소 조합을 동시에 계산)
-    #    다중 GPU 환경에서 권장 (각 GPU에 다른 시스템 할당)
-    PARALLEL_SYSTEM_CALCULATION = True  # True: 시스템별 병렬, False: 순차 처리
+    #    ⚠️ Windows + GPU 환경에서는 False 권장 (메모리 충돌 위험)
+    PARALLEL_SYSTEM_CALCULATION = False  # True: 시스템별 병렬, False: 순차 처리
     NUM_GPUS = 1  # 사용 가능한 GPU 개수 (서버: 2~4, 개인PC: 1)
 
-    # 3. MD 병렬 계산 (여러 온도 조건을 동시에 테스트)
-    PARALLEL_MD_TEMPERATURES = False# True: 다중 온도 병렬, False: 단일 온도만
+    # 3. MD 병렬 실행 (같은 온도에서 여러 구조를 동시에 계산)
+    #    ⚠️ Windows 사용자: False 권장 (메모리 경합 및 프로세스 폭발 위험)
+    #    ✅ Linux/서버 사용자: True 권장 (큰 성능 향상, 특히 다중 GPU 환경)
+    PARALLEL_MD_EXECUTION = True  # True: 병렬 MD, False: 순차 MD
+    MD_NUM_PROCESSES = 2  # 병렬 실행 시 프로세스 수 (GPU 메모리에 따라 조절: 2-4 권장)
+
+    # 4. MD 다중 온도 테스트 (미래 기능, 현재 미사용)
+    PARALLEL_MD_TEMPERATURES = False  # True: 다중 온도 병렬, False: 단일 온도만
     MD_TEMPERATURE_RANGE = [300, 500, 1000, 1500]  # 테스트할 온도 리스트 (K)
 
     # 자동 생성된 비율 리스트 (0.0과 1.0 제외, 순수 원소는 별도 계산)

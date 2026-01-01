@@ -8,20 +8,30 @@ class ExperimentalDataMiner:
     Materials Project API를 사용하여 실제 실험(Theoretical=False) 데이터를 
     추출하고 검증용 레퍼런스로 변환하는 클래스
     """
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, data_source: str = None, use_theoretical: bool = None):
+        """
+        Args:
+            api_key: Materials Project API 키 (None이면 config에서 가져옴)
+            data_source: 데이터 소스 ("materials_project", "literature", "auto")
+            use_theoretical: theoretical 데이터 포함 여부 (None이면 config 설정 사용)
+        """
         self.api_key = api_key or SimConfig.MP_API_KEY
+        self.data_source = data_source or SimConfig.VALIDATION_DATA_SOURCE
+        self.use_theoretical = use_theoretical if use_theoretical is not None else SimConfig.VALIDATION_USE_THEORETICAL
 
         # 환경 변수가 있으면 우선 사용
         env_key = os.environ.get("MP_API_KEY")
         if env_key:
             self.api_key = env_key
 
-        if not self.api_key:
-            raise ValueError("❌ 유효한 MP_API_KEY가 설정되지 않았습니다.")
+        # literature 모드가 아닌 경우에만 API 키 체크
+        if self.data_source != "literature":
+            if not self.api_key:
+                raise ValueError("❌ 유효한 MP_API_KEY가 설정되지 않았습니다.")
 
-        # API 키 유효성 간단 체크 (길이가 너무 짧으면 잘못된 키)
-        if len(self.api_key) < 20:
-            raise ValueError(f"❌ MP_API_KEY가 너무 짧습니다 (현재: {len(self.api_key)}자). 올바른 키를 config.py에 설정하세요.")
+            # API 키 유효성 간단 체크 (길이가 너무 짧으면 잘못된 키)
+            if len(self.api_key) < 20:
+                raise ValueError(f"❌ MP_API_KEY가 너무 짧습니다 (현재: {len(self.api_key)}자). 올바른 키를 config.py에 설정하세요.")
 
     def get_manual_cu_ni_references(self) -> pd.DataFrame:
         """
@@ -81,16 +91,24 @@ class ExperimentalDataMiner:
     def fetch_cu_ni_references(self) -> pd.DataFrame:
         """
         Cu-Ni 시스템의 실험 기반 데이터를 검색하여 데이터프레임으로 반환
+        config.py의 VALIDATION_DATA_SOURCE 설정에 따라 동작 방식 결정
         """
-        print(f"⛏️  Materials Project에서 Cu-Ni 실험 데이터 검색 중...")
-        
+        # literature 모드: Materials Project 건너뛰고 문헌 데이터만 사용
+        if self.data_source == "literature":
+            print(f"📚 문헌 데이터 모드: Materials Project 건너뜀")
+            return self.get_manual_cu_ni_references()
+
+        # materials_project 또는 auto 모드
+        data_type = "실험" if not self.use_theoretical else "실험+이론"
+        print(f"⛏️  Materials Project에서 Cu-Ni {data_type} 데이터 검색 중...")
+
         try:
             with MPRester(self.api_key) as mpr:
                 # 1. API 쿼리 실행
                 docs = mpr.materials.summary.search(
                     elements=["Cu", "Ni"],
                     is_metal=True,
-                    theoretical=False,  # 실제 실험 데이터만 추출하는 핵심 옵션
+                    theoretical=not self.use_theoretical,  # config 설정에 따라 결정
                     fields=[
                         "material_id", 
                         "formula_pretty", 
@@ -103,6 +121,9 @@ class ExperimentalDataMiner:
 
                 if not docs:
                     print("⚠️  검색된 실험 데이터가 없습니다.")
+                    if self.data_source == "auto":
+                        print("   🔄 문헌 기반 레퍼런스로 전환합니다...")
+                        return self.get_manual_cu_ni_references()
                     return pd.DataFrame()
 
                 # 2. 데이터 파싱 (Cu-Ni 순수 합금만 필터링)
@@ -131,8 +152,10 @@ class ExperimentalDataMiner:
 
                 if not extracted_data:
                     print("⚠️  Cu-Ni 순수 합금 데이터가 Materials Project에 없습니다.")
-                    print("   🔄 문헌 기반 레퍼런스로 전환합니다...")
-                    return self.get_manual_cu_ni_references()
+                    if self.data_source == "auto":
+                        print("   🔄 문헌 기반 레퍼런스로 전환합니다...")
+                        return self.get_manual_cu_ni_references()
+                    return pd.DataFrame()
 
                 df = pd.DataFrame(extracted_data)
 
@@ -145,12 +168,19 @@ class ExperimentalDataMiner:
 
         except Exception as e:
             print(f"❌ MP API 호출 중 오류 발생: {e}")
-            print("   🔄 문헌 기반 레퍼런스로 전환합니다...")
-            return self.get_manual_cu_ni_references()
+            if self.data_source == "auto":
+                print("   🔄 문헌 기반 레퍼런스로 전환합니다...")
+                return self.get_manual_cu_ni_references()
+            elif self.data_source == "materials_project":
+                print("   ⚠️  materials_project 모드에서는 대체 데이터를 사용하지 않습니다.")
+                return pd.DataFrame()
+            else:
+                return self.get_manual_cu_ni_references()
 
     def fetch_binary_alloy_references(self, element_a: str, element_b: str) -> pd.DataFrame:
         """
         임의의 2원계 합금(A-B) 실험 데이터를 가져옵니다.
+        config.py의 VALIDATION_DATA_SOURCE 설정에 따라 동작 방식 결정
 
         Args:
             element_a: 첫 번째 원소 (예: "Cu")
@@ -159,7 +189,14 @@ class ExperimentalDataMiner:
         Returns:
             실험 레퍼런스 DataFrame
         """
-        print(f"⛏️  Materials Project에서 {element_a}-{element_b} 실험 데이터 검색 중...")
+        # literature 모드: Materials Project 건너뛰고 문헌 데이터만 사용
+        if self.data_source == "literature":
+            print(f"📚 문헌 데이터 모드: Materials Project 건너뜀")
+            return self._get_manual_binary_references(element_a, element_b)
+
+        # materials_project 또는 auto 모드
+        data_type = "실험" if not self.use_theoretical else "실험+이론"
+        print(f"⛏️  Materials Project에서 {element_a}-{element_b} {data_type} 데이터 검색 중...")
 
         try:
             with MPRester(self.api_key) as mpr:
@@ -167,7 +204,7 @@ class ExperimentalDataMiner:
                 docs = mpr.materials.summary.search(
                     elements=[element_a, element_b],
                     is_metal=True,
-                    theoretical=False,
+                    theoretical=not self.use_theoretical,  # config 설정에 따라 결정
                     fields=[
                         "material_id",
                         "formula_pretty",
@@ -180,7 +217,10 @@ class ExperimentalDataMiner:
 
                 if not docs:
                     print(f"⚠️  {element_a}-{element_b} 실험 데이터가 없습니다.")
-                    return self._get_manual_binary_references(element_a, element_b)
+                    if self.data_source == "auto":
+                        print("   🔄 문헌 기반 레퍼런스로 전환합니다...")
+                        return self._get_manual_binary_references(element_a, element_b)
+                    return pd.DataFrame()
 
                 # 순수 합금만 필터링 (다른 원소 제외)
                 extracted_data = []
@@ -205,8 +245,10 @@ class ExperimentalDataMiner:
 
                 if not extracted_data:
                     print(f"⚠️  {element_a}-{element_b} 순수 합금 데이터가 Materials Project에 없습니다.")
-                    print("   🔄 문헌 기반 레퍼런스로 전환합니다...")
-                    return self._get_manual_binary_references(element_a, element_b)
+                    if self.data_source == "auto":
+                        print("   🔄 문헌 기반 레퍼런스로 전환합니다...")
+                        return self._get_manual_binary_references(element_a, element_b)
+                    return pd.DataFrame()
 
                 df = pd.DataFrame(extracted_data)
                 df = df.sort_values("exp_e_above_hull").drop_duplicates("formula")
@@ -217,8 +259,14 @@ class ExperimentalDataMiner:
 
         except Exception as e:
             print(f"❌ MP API 호출 중 오류 발생: {e}")
-            print("   🔄 문헌 기반 레퍼런스로 전환합니다...")
-            return self._get_manual_binary_references(element_a, element_b)
+            if self.data_source == "auto":
+                print("   🔄 문헌 기반 레퍼런스로 전환합니다...")
+                return self._get_manual_binary_references(element_a, element_b)
+            elif self.data_source == "materials_project":
+                print("   ⚠️  materials_project 모드에서는 대체 데이터를 사용하지 않습니다.")
+                return pd.DataFrame()
+            else:
+                return self._get_manual_binary_references(element_a, element_b)
 
     def _get_manual_binary_references(self, element_a: str, element_b: str) -> pd.DataFrame:
         """
@@ -292,11 +340,64 @@ class ExperimentalDataMiner:
         print(f"   💡 Tip: exp_reference.py에서 원소 데이터를 추가할 수 있습니다.")
         return df
 
+    def load_custom_csv(self, csv_path: str) -> pd.DataFrame:
+        """
+        사용자 정의 CSV 파일에서 실험 데이터 로드
+
+        CSV 형식 요구사항:
+        - formula: 화학식 (필수)
+        - exp_lattice_a: 격자 상수 a (필수)
+        - exp_density: 밀도 (필수)
+        - exp_lattice_b, exp_lattice_c: 선택사항
+        - mp_id, exp_formation_energy, exp_e_above_hull, crystal_system: 선택사항
+
+        Args:
+            csv_path: CSV 파일 경로
+
+        Returns:
+            실험 데이터 DataFrame
+        """
+        print(f"📂 사용자 정의 CSV 파일 로드 중: {csv_path}")
+
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"❌ CSV 파일을 찾을 수 없습니다: {csv_path}")
+
+        try:
+            df = pd.read_csv(csv_path)
+
+            # 필수 컬럼 체크
+            required_cols = ["formula", "exp_lattice_a", "exp_density"]
+            missing_cols = [col for col in required_cols if col not in df.columns]
+
+            if missing_cols:
+                raise ValueError(f"❌ 필수 컬럼이 누락되었습니다: {', '.join(missing_cols)}")
+
+            # 선택사항 컬럼 자동 채우기
+            if "exp_lattice_b" not in df.columns:
+                df["exp_lattice_b"] = df["exp_lattice_a"]
+            if "exp_lattice_c" not in df.columns:
+                df["exp_lattice_c"] = df["exp_lattice_a"]
+            if "mp_id" not in df.columns:
+                df["mp_id"] = "CUSTOM-" + df["formula"]
+            if "exp_formation_energy" not in df.columns:
+                df["exp_formation_energy"] = 0.0
+            if "exp_e_above_hull" not in df.columns:
+                df["exp_e_above_hull"] = 0.0
+            if "crystal_system" not in df.columns:
+                df["crystal_system"] = "Unknown"
+
+            print(f"✅ 총 {len(df)}개의 사용자 정의 레퍼런스 로드 완료")
+            print(f"   📋 화학식: {', '.join(df['formula'].tolist())}")
+            return df
+
+        except Exception as e:
+            raise ValueError(f"❌ CSV 파일 로드 중 오류 발생: {e}")
+
     def save_to_csv(self, df, filename="experimental_references.csv"):
         """추출된 데이터를 CSV로 저장"""
         if not df.empty:
             save_path = os.path.join(SimConfig.SAVE_DIR, filename)
-            df.to_csv(save_path, index=False)
+            df.to_csv(save_path, index=False, encoding='utf-8-sig')
             print(f"💾 실험 레퍼런스 저장 완료: {save_path}")
             return save_path
         return None

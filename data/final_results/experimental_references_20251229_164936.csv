@@ -1,0 +1,4 @@
+mp_id,formula,exp_lattice_a,exp_lattice_b,exp_lattice_c,exp_density,exp_formation_energy,exp_e_above_hull,crystal_system
+MANUAL-Fe,Fe,2.8665,2.8665,2.8665,7.87,0.0,0.0,Im-3m
+MANUAL-Cr,Cr,2.8846,2.8846,2.8846,7.19,0.0,0.0,Im-3m
+MANUAL-FeCr,FeCr,2.8755499999999996,2.8755499999999996,2.8755499999999996,7.53,-0.01,0.0,Im-3m
