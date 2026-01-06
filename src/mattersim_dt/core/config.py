@@ -8,9 +8,22 @@ class SimConfig:
     # ==========================================
     # [중요] API Key 중앙 관리
     # ==========================================
-    # 여기에 본인의 키를 붙여넣으세요.
-    # (환경 변수에 설정되어 있다면 그걸 우선 사용하고, 없으면 아래 문자열을 사용합니다)
-    MP_API_KEY = "5DPnayEkpta3vy5RiF6wNa2Am0O28x9s"
+    MP_API_KEY = os.environ.get("MP_API_KEY")
+    DB_URL = os.environ.get("DB_URL", "postgresql://mattersim:mattersim_password@localhost:5432/mattersim_dt")
+
+    # .env 파일 로드 시도
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        if not MP_API_KEY:
+            MP_API_KEY = os.environ.get("MP_API_KEY")
+    except ImportError:
+        pass
+        
+    if not MP_API_KEY:
+         # Fallback for user who might not have set env yet (Optional: remove this if strict security is needed)
+         # Leaving empty to enforce env var usage or handled by validation later
+         MP_API_KEY = ""
 
     # ==========================================
     # 시스템 설정
@@ -22,7 +35,8 @@ class SimConfig:
     MINER_CSV_PATH = "auto_mining_results_final.csv"
 
     # Pipeline 설정
-    PIPELINE_MODE = "manual"  # "auto": CSV에서 자동 로드, "manual": 수동으로 원소 지정
+    # Pipeline 설정
+    PIPELINE_MODE = "auto"  # "auto": CSV에서 자동 로드, "manual": 수동으로 원소 지정
     MANUAL_ELEMENT_A = "Fe"  # PIPELINE_MODE="manual"일 때만 사용 (예: "Cu", "Al", "Fe" 등)
     MANUAL_ELEMENT_B = "Cr"  # PIPELINE_MODE="manual"일 때만 사용 (예: "Ni", "Mg", "Cr" 등)
     MAX_SYSTEMS = None  # "auto" 모드에서 실험할 최대 시스템 수 (None이면 전체)
@@ -36,12 +50,12 @@ class SimConfig:
 
     # MD (가열 실험) 설정
     MD_TEMPERATURE = 1000.0  # 온도 (K)
-    MD_STEPS = 5000         # 스텝 수 (권장: 테스트 1000, 실제 5000-10000)
+    MD_STEPS = 1000        # 스텝 수 (권장: 테스트 1000, 실제 5000-10000)
     MD_TIMESTEP = 1.0        # 시간 간격 (fs)
 
     # Trajectory 저장 설정
-    SAVE_RELAX_TRAJ = True   # 구조 이완 과정 trajectory 저장 여부
-    SAVE_MD_TRAJ = True      # MD 시뮬레이션 trajectory 저장 여부 (항상 True 권장)
+    SAVE_RELAX_TRAJ = False   # 구조 이완 과정 trajectory 저장 여부
+    SAVE_MD_TRAJ = False      # MD 시뮬레이션 trajectory 저장 여부 (항상 True 권장)
 
     # 필터링 기준
     STABILITY_THRESHOLD = 0.05
