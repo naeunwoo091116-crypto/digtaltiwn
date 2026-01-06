@@ -969,4 +969,446 @@ is_thermally_stable = (
 
 ---
 
+## 🔺 3원소 합금 시뮬레이션 (Ternary Alloy) ⭐ 신규!
+
+### 📌 개요
+
+3원소 합금 기능은 기존 2원소 파이프라인을 확장하여 3개 원소의 조합을 시뮬레이션할 수 있습니다.
+
+**주요 특징:**
+- ✅ 균등 분할 방식의 조성 생성 (1:1:1, 2:1:1, 1:2:1 등)
+- ✅ 결정구조 우선순위로 base 원소 자동 선택 (FCC > BCC > HCP)
+- ✅ 2원소 파이프라인과 독립적으로 실행 (기존 기능 보존)
+- ✅ StabilityAnalyzer, MDSimulator 등 기존 분석 도구 재사용
+
+---
+
+### 🔧 설정 방법
+
+[config.py](src/mattersim_dt/core/config.py)에서 다음 설정을 수정하세요:
+
+```python
+# 3원소 합금 설정
+ENABLE_TERNARY_ALLOY = True  # 3원소 모드 활성화
+
+# Manual 모드용 설정
+PIPELINE_MODE = "manual"  # "auto" 또는 "manual"
+MANUAL_ELEMENT_A = "Fe"   # 첫 번째 원소
+MANUAL_ELEMENT_B = "Cr"   # 두 번째 원소
+MANUAL_ELEMENT_C = "Ni"   # 세 번째 원소
+
+# 조성 생성 설정
+TERNARY_COMPOSITION_MODE = "generated"  # "generated": 균등분할 생성, "mined": MP에서 실제 비율 추출
+TERNARY_COMPOSITION_TOTAL = [3, 4, 5, 6]  # "generated" 모드: 균등 분할 총합 범위
+TERNARY_MINING_MAX_RATIOS = None  # "mined" 모드: 최대 비율 개수 (None이면 전체)
+
+# 슈퍼셀 크기 (조합이 많아서 2원소보다 작게 권장)
+TERNARY_SUPERCELL_SIZE = 3
+
+# 안정성 임계값
+TERNARY_STABILITY_THRESHOLD = 0.05  # eV/atom
+```
+
+---
+
+### 📐 조성 생성 방법
+
+3원소 합금 파이프라인은 2가지 조성 생성 방법을 지원합니다:
+
+#### 1️⃣ Generated 모드 (균등 분할)
+
+정수 비율 (a, b, c)의 합이 특정 값(예: 3, 4, 5, 6)이 되도록 조합을 생성합니다.
+
+```python
+TERNARY_COMPOSITION_MODE = "generated"
+TERNARY_COMPOSITION_TOTAL = [3, 4, 5, 6]
+```
+
+**생성되는 조성:**
+```
+총합 = 3: (1,1,1) → 1개
+총합 = 4: (2,1,1), (1,2,1), (1,1,2) → 3개
+총합 = 5: (3,1,1), (1,3,1), (1,1,3), (2,2,1), (2,1,2), (1,2,2) → 6개
+총합 = 6: (4,1,1), ..., (2,2,2) → 10개
+
+기본 설정 [3,4,5,6]: 총 20개 조성
+```
+
+**Fe-Cr-Ni 예시:**
+
+| 비율 튜플 | 조성 | 설명 |
+|----------|------|------|
+| (1,1,1) | Fe₃₃Cr₃₃Ni₃₄ | 균등 분포 |
+| (2,1,1) | Fe₅₀Cr₂₅Ni₂₅ | Fe 50% |
+| (1,2,1) | Fe₂₅Cr₅₀Ni₂₅ | Cr 50% |
+| (1,1,2) | Fe₂₅Cr₂₅Ni₅₀ | Ni 50% |
+| (2,2,2) | Fe₃₃Cr₃₃Ni₃₄ | (1,1,1)과 동일 |
+
+#### 2️⃣ Mined 모드 (Materials Project 마이닝) ⭐ 신규!
+
+Materials Project에서 **실제 연구된 3원소 합금**의 조성 비율을 자동으로 추출합니다.
+
+```python
+TERNARY_COMPOSITION_MODE = "mined"
+TERNARY_MINING_MAX_RATIOS = None  # 전체 (또는 10 등으로 제한)
+```
+
+**장점:**
+- ✅ **실제 연구된 조성**: 이미 실험적으로 검증된 비율만 사용
+- ✅ **자동 비율 추출**: Pymatgen Composition에서 정수 비율로 자동 변환
+- ✅ **안정성 보장**: Materials Project의 안정한 구조만 선택 (energy_above_hull < 0.1 eV)
+- ✅ **API 자동 대체**: 마이닝 실패 시 자동으로 균등 분할 모드로 전환
+
+**동작 예시 (Fe-Cr-Ni):**
+```
+⛏️ [TernaryMiner] Fe-Cr-Ni 3원소 합금 탐색 중...
+   🔎 검색된 총 데이터: 47개
+   ✅ 발견된 3원소 합금: 12개
+
+======================================================================
+📊 3원소 합금 마이닝 결과 요약
+======================================================================
+Material ID     Formula         Ratio (a:b:c)   E_hull (eV)
+----------------------------------------------------------------------
+mp-1234         FeCrNi          1:1:1                 0.0023
+mp-5678         Fe2CrNi         2:1:1                 0.0156
+mp-9101         FeCr2Ni         1:2:1                 0.0089
+mp-1121         FeCrNi2         1:1:2                 0.0034
+...
+======================================================================
+
+중복 제거된 조성 비율: 8개
+조성 리스트:
+  (1, 1, 1) → Fe 33.3% : Cr 33.3% : Ni 33.3%
+  (2, 1, 1) → Fe 50.0% : Cr 25.0% : Ni 25.0%
+  (1, 2, 1) → Fe 25.0% : Cr 50.0% : Ni 25.0%
+  ...
+```
+
+**테스트 방법:**
+```bash
+# 마이닝 테스트 실행
+python test_ternary_mining.py
+```
+
+**프로그래밍 방식 사용:**
+```python
+from mattersim_dt.miner import TernaryMaterialMiner
+
+miner = TernaryMaterialMiner()
+
+# Fe-Cr-Ni 합금 마이닝
+results = miner.search_ternary_alloys("Fe", "Cr", "Ni")
+
+# 결과 요약
+miner.print_summary(results)
+
+# 중복 제거한 비율 추출
+unique_ratios = miner.get_unique_ratios(results)
+print(f"발견된 조성: {unique_ratios}")
+# [(1, 1, 1), (2, 1, 1), (1, 2, 1), ...]
+```
+
+**주의사항:**
+- Materials Project API 키 필요
+- 모든 3원소 조합에 데이터가 있는 것은 아님
+- 마이닝 실패 시 자동으로 균등 분할 모드로 전환됨
+
+---
+
+### 🏗️ Base 원소 선택 로직
+
+**결정구조 우선순위:**
+
+```python
+CRYSTAL_PRIORITY = {
+    'fcc': 3,  # Face-Centered Cubic (최우선)
+    'bcc': 2,  # Body-Centered Cubic
+    'hcp': 1   # Hexagonal Close-Packed
+}
+```
+
+**선택 예시:**
+
+| 시스템 | 결정구조 | Base 원소 | 이유 |
+|--------|---------|----------|------|
+| Fe-Cr-Ni | BCC, BCC, FCC | **Ni** | FCC 우선순위 가장 높음 |
+| Al-Cu-Mg | FCC, FCC, HCP | **Al** | 동점이면 알파벳순 |
+| Ti-V-Cr | HCP, BCC, BCC | **V** (또는 Cr) | BCC > HCP, 알파벳순 |
+
+**선택된 base 원소의 격자 구조를 슈퍼셀로 확장한 후, 3원소를 비율에 맞게 치환합니다.**
+
+---
+
+### 🚀 실행 방법
+
+#### 1️⃣ Manual 모드 - Generated (균등 분할)
+
+```bash
+# config.py 설정:
+ENABLE_TERNARY_ALLOY = True
+PIPELINE_MODE = "manual"
+MANUAL_ELEMENT_A = "Fe"
+MANUAL_ELEMENT_B = "Cr"
+MANUAL_ELEMENT_C = "Ni"
+TERNARY_COMPOSITION_MODE = "generated"
+TERNARY_COMPOSITION_TOTAL = [3, 4]  # 간단히 테스트
+
+# 실행
+python run_ternary_pipeline.py
+```
+
+#### 1️⃣-B Manual 모드 - Mined (실제 비율 마이닝) ⭐ 신규!
+
+```bash
+# config.py 설정:
+ENABLE_TERNARY_ALLOY = True
+PIPELINE_MODE = "manual"
+MANUAL_ELEMENT_A = "Fe"
+MANUAL_ELEMENT_B = "Cr"
+MANUAL_ELEMENT_C = "Ni"
+TERNARY_COMPOSITION_MODE = "mined"  # Materials Project에서 비율 추출
+TERNARY_MINING_MAX_RATIOS = 10      # 최대 10개 비율만 사용 (None이면 전체)
+
+# 실행
+python run_ternary_pipeline.py
+```
+
+**예상 출력:**
+```
+🎯 Target System: Fe - Cr - Ni
+
+=== [Phase 1-1] 순수 원소 기준 구조 계산 ===
+   🔹 Fe 순수 구조 이완 중...
+     ✓ 완료: -8.2341 eV/atom
+   🔹 Cr 순수 구조 이완 중...
+     ✓ 완료: -9.5104 eV/atom
+   🔹 Ni 순수 구조 이완 중...
+     ✓ 완료: -5.4562 eV/atom
+
+=== [Phase 1-2] 조성별 합금 구조 생성 및 이완 ===
+   ℹ️  조성 범위: [3, 4]
+   ℹ️  총 조성 개수: 4개
+   [1/4] 조성 (1, 1, 1): Fe:Cr:Ni
+     ✓ 완료: CrFeNi = -7.3251 eV/atom
+   [2/4] 조성 (2, 1, 1): Fe:Cr:Ni
+     ✓ 완료: Cr2Fe4Ni2 = -7.8342 eV/atom
+   ...
+
+=== [Phase 2] 안정성 분석 및 필터링 ===
+   ✅ 안정 구조: 5/7개
+
+=== [Phase 3] MD 시뮬레이션 (안정 구조만) ===
+   🔥 CrFeNi MD 시작...
+     ✓ MD 완료: data/results/md_CrFeNi_1000K.traj
+   ...
+```
+
+#### 2️⃣ Auto 모드 (CSV에서 자동 로드)
+
+```bash
+# config.py 설정:
+ENABLE_TERNARY_ALLOY = True
+PIPELINE_MODE = "auto"
+MINER_CSV_PATH = "auto_mining_results_final.csv"
+MAX_SYSTEMS = 3  # 테스트용으로 3개만
+
+# 실행
+python run_ternary_pipeline.py
+```
+
+**CSV 파일 요구사항:**
+- `formula` 컬럼에 3원소 화학식 포함 (예: "FeCrNi", "AlCuMg")
+- Pymatgen Composition으로 파싱 가능해야 함
+
+---
+
+### 📊 파이프라인 흐름도
+
+```
+TernaryAlloyMixer(element_A, element_B, element_C)
+  ↓
+Base 원소 선택 (FCC > BCC > HCP)
+  ↓
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Phase 1-1: 순수 원소 기준값 계산 (3개)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+generate_pure_element_structure(Fe) → Relax
+generate_pure_element_structure(Cr) → Relax
+generate_pure_element_structure(Ni) → Relax
+  ↓
+StabilityAnalyzer.add_result() × 3
+  ↓
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Phase 1-2: 조성별 합금 생성 (20개)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+generate_composition_ratios([3,4,5,6])
+  ↓
+For each (a, b, c):
+  generate_ternary_structure((a,b,c)) → Relax
+  StabilityAnalyzer.add_result()
+  ↓
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Phase 2: 안정성 필터링
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+StabilityAnalyzer.analyze()
+  ↓
+Convex Hull 계산 (3원소 Phase Diagram)
+  ↓
+energy_above_hull < TERNARY_STABILITY_THRESHOLD
+  ↓
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Phase 3: MD 시뮬레이션 (안정 구조만)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For each stable structure:
+  MDSimulator.run() → Trajectory
+  MDAnalyzer.analyze()
+  ↓
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+결과 저장
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ternary_stability_{system}_{timestamp}.csv
+ternary_details_{system}_{timestamp}.csv
+```
+
+---
+
+### 📁 결과 파일
+
+**1. 안정성 분석 결과:**
+
+파일명: `ternary_stability_Fe-Cr-Ni_20251229_123456.csv`
+
+| formula | energy_per_atom | energy_above_hull | is_stable |
+|---------|----------------|-------------------|-----------|
+| Fe | -8.2341 | 0.0000 | True |
+| Cr | -9.5104 | 0.0000 | True |
+| Ni | -5.4562 | 0.0000 | True |
+| CrFeNi | -7.3251 | 0.0123 | True |
+| Cr2Fe4Ni2 | -7.8342 | 0.0891 | False |
+
+**2. 상세 물성 데이터:**
+
+파일명: `ternary_details_Fe-Cr-Ni_20251229_123456.csv`
+
+| system | formula | ratio_tuple | base_element | energy_per_atom | is_stable | md_traj_file |
+|--------|---------|-------------|--------------|----------------|-----------|--------------|
+| Fe-Cr-Ni | Fe | (1,0,0) | Fe | -8.2341 | True | data/results/md_Fe_1000K.traj |
+| Fe-Cr-Ni | CrFeNi | (1,1,1) | Ni | -7.3251 | True | data/results/md_CrFeNi_1000K.traj |
+
+---
+
+### 🧪 테스트 스크립트
+
+**test_ternary_mixer.py**를 실행하여 TernaryAlloyMixer 기능을 검증할 수 있습니다:
+
+```bash
+python test_ternary_mixer.py
+```
+
+**테스트 내용:**
+1. 조성 생성 알고리즘 검증 (20개 조성 생성)
+2. Base 원소 선택 검증 (Fe-Cr-Ni → Ni)
+3. 3원소 구조 생성 검증 (ASE Atoms 생성)
+4. 순수 원소 구조 생성 검증
+
+**예상 출력:**
+```
+[테스트 1] 조성 생성 알고리즘
+조성 범위: [3, 4, 5, 6]
+총 조성 개수: 20개
+✅ 조성 개수 검증 통과: 20개
+
+[테스트 2] Base 원소 선택
+Fe(BCC) - Cr(BCC) - Ni(FCC) → Base: Ni
+✅ Fe-Cr-Ni Base 선택 검증 통과: Ni
+
+[테스트 3] 3원소 구조 생성
+✅ 구조 생성 검증 통과
+
+✅ 모든 테스트 통과!
+```
+
+---
+
+### ⏱️ 계산 시간 예상
+
+**Fe-Cr-Ni 시스템 (TERNARY_COMPOSITION_TOTAL=[3,4,5,6], 슈퍼셀=3):**
+
+| 단계 | 구조 개수 | 예상 시간 (GPU) |
+|------|----------|----------------|
+| 순수 원소 (Phase 1-1) | 3개 | ~6분 (각 2분) |
+| 조성별 합금 (Phase 1-2) | 20개 | ~40분 (각 2분) |
+| **Phase 1 총계** | **23개** | **~46분** |
+| 안정 구조 (예상 ~10개) | 10개 | - |
+| MD 시뮬레이션 (Phase 3) | 10개 | ~50분 (각 5분) |
+| **전체 파이프라인** | - | **~1.5-2시간** |
+
+**계산 시간 단축 방법:**
+- `TERNARY_COMPOSITION_TOTAL = [3, 4]`: 4개 조성만 테스트 → ~20분
+- `MD_STEPS = 1000`: MD 스텝 감소 → MD 시간 1/5 단축
+- `TERNARY_SUPERCELL_SIZE = 2`: 슈퍼셀 감소 → 이완 시간 단축 (정확도↓)
+
+---
+
+### ⚠️ 주의사항
+
+#### 1. 결정구조 우선순위
+- FCC > BCC > HCP로 고정됨
+- 동점일 경우 알파벳순으로 결정
+- 필요시 코드 수정으로 수동 지정 가능
+
+#### 2. 조성 개수
+- `TERNARY_COMPOSITION_TOTAL = [3,4,5,6]`: 20개 조성
+- 슈퍼셀 크기 3 기준: 각 구조당 ~100원자 (4³ × 4 × 조성비)
+- **계산량**: 2원소 대비 약 2-3배
+
+#### 3. 실험 데이터 부족
+- 3원소 합금 실험 데이터는 매우 제한적
+- Materials Project에도 데이터가 적음
+- **사용자 정의 CSV 권장** (CUSTOM_EXP_DATA_CSV 설정)
+
+#### 4. Convex Hull 계산
+- StabilityAnalyzer는 n-원소 자동 지원
+- 3원소 Phase Diagram 사용
+- 4개 이상 원소는 Convex Hull 계산 복잡도 증가
+
+---
+
+### 💡 향후 확장 가능성
+
+#### 1. SQS (Special Quasirandom Structures)
+- **현재**: 완전 무작위 치환
+- **개선**: SQS 알고리즘으로 통계적으로 최적화된 구조 생성
+- **장점**: 실제 무작위 합금과 더 유사한 단거리 질서 구현
+
+#### 2. 4원소 이상 (Quaternary Alloy)
+- 현재 설계를 n-원소로 일반화
+- 조성 생성 알고리즘 확장 필요
+- Convex Hull 계산 복잡도 증가
+
+#### 3. Cluster Expansion
+- 3원소 상호작용 에너지 고려
+- Vegard's Law 대신 더 정확한 예측
+- 기계학습 기반 에너지 예측
+
+---
+
+### 📚 참고 자료
+
+**관련 파일:**
+- [ternary_mixer.py](src/mattersim_dt/builder/ternary_mixer.py) - TernaryAlloyMixer 클래스
+- [mp_api.py](src/mattersim_dt/miner/mp_api.py) - TernaryMaterialMiner 클래스 (마이닝 엔진)
+- [run_ternary_pipeline.py](run_ternary_pipeline.py) - 3원소 파이프라인 실행 스크립트
+- [test_ternary_mixer.py](test_ternary_mixer.py) - 구조 생성 테스트 스크립트
+- [test_ternary_mining.py](test_ternary_mining.py) - 마이닝 기능 테스트 스크립트
+- [config.py](src/mattersim_dt/core/config.py) - 설정 파일 (라인 65-85)
+
+**학술 참고 문헌:**
+1. **Vegard's Law**: Vegard, L. (1921). "Die Konstitution der Mischkristalle"
+2. **Convex Hull**: Pymatgen documentation - Phase Diagram analysis
+3. **SQS**: Zunger et al. (1990). "Special quasirandom structures"
+
+---
+
 **Happy Material Discovery! 🔬✨**

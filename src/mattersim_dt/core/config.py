@@ -62,6 +62,32 @@ class SimConfig:
     MIXING_RATIO_STEP = 0.1  # 혼합 비율 간격 (0.1 = 10%씩, 0.05 = 5%씩)
     SUPERCELL_SIZE = 4  # 슈퍼셀 크기
 
+    # 2원소 조성 모드 설정
+    BINARY_COMPOSITION_MODE = "generated"  # "generated": MIXING_RATIO_STEP 사용, "mined": Materials Project에서 실제 비율 추출
+    BINARY_MINING_MAX_RATIOS = None  # "mined" 모드에서 사용할 최대 비율 개수 (None이면 전체)
+
+    # ==========================================
+    # 3원소 합금 설정 (Ternary Alloy)
+    # ==========================================
+    ENABLE_TERNARY_ALLOY = True  # True: 3원소 모드 활성화, False: 2원소 모드만 사용
+
+    # Manual 모드용 설정
+    MANUAL_ELEMENT_C = "Ni"  # 세 번째 원소 (PIPELINE_MODE="manual"일 때만 사용)
+
+    # 조성 생성 설정
+    TERNARY_COMPOSITION_TOTAL = [3, 4, 5, 6]  # 균등 분할 총합 범위
+    # 예: [3,4,5,6]이면 (1,1,1), (2,1,1), (1,2,1), ... 등 총 20개 조합 생성
+
+    # 3원소 전용 슈퍼셀 크기 (조합이 많아서 2원소보다 작게 설정)
+    TERNARY_SUPERCELL_SIZE = 3  # 기본값: 3 (2원소는 4)
+
+    # 3원소 안정성 임계값
+    TERNARY_STABILITY_THRESHOLD = 0.05  # eV/atom (energy_above_hull 기준)
+
+    # 3원소 조성 모드 설정
+    TERNARY_COMPOSITION_MODE = "generated"  # "generated": 균등분할로 생성, "mined": Materials Project에서 실제 비율 추출
+    TERNARY_MINING_MAX_RATIOS = None  # "mined" 모드에서 사용할 최대 비율 개수 (None이면 전체)
+
     # ==========================================
     # 병렬처리 설정
     # ==========================================
@@ -78,7 +104,7 @@ class SimConfig:
     # 3. MD 병렬 실행 (같은 온도에서 여러 구조를 동시에 계산)
     #    ⚠️ Windows 사용자: False 권장 (메모리 경합 및 프로세스 폭발 위험)
     #    ✅ Linux/서버 사용자: True 권장 (큰 성능 향상, 특히 다중 GPU 환경)
-    PARALLEL_MD_EXECUTION = True  # True: 병렬 MD, False: 순차 MD
+    PARALLEL_MD_EXECUTION = False  # True: 병렬 MD, False: 순차 MD
     MD_NUM_PROCESSES = 2  # 병렬 실행 시 프로세스 수 (GPU 메모리에 따라 조절: 2-4 권장)
 
     # 4. MD 다중 온도 테스트 (미래 기능, 현재 미사용)

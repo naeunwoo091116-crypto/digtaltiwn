@@ -7,10 +7,10 @@ from pymatgen.core import Composition
 # MatterSim 모듈 임포트 (src/mattersim_dt 사용)
 # ============================================================================
 from mattersim_dt.core import SimConfig
-from mattersim_dt.builder import RandomAlloyMixer
+from mattersim_dt.builder import RandomAlloyMixer, TernaryAlloyMixer
 from mattersim_dt.engine import get_calculator, StructureRelaxer, MDSimulator
 from mattersim_dt.analysis import StabilityAnalyzer, MDAnalyzer, MaterialValidator
-from mattersim_dt.miner import ExperimentalDataMiner
+from mattersim_dt.miner import ExperimentalDataMiner, MaterialMiner, TernaryMaterialMiner
 import multiprocessing as mp
 
 import torch
@@ -202,6 +202,54 @@ def load_element_pairs_from_csv(csv_path, max_systems=None):
     print(f"✅ 총 {len(pairs_list)}개의 2원소 시스템 발견")
     return pairs_list
 
+def load_element_triplets_from_csv(csv_path, max_systems=None):
+    """
+    CSV 파일에서 3원소 조합을 추출하는 함수
+
+    Args:
+        csv_path: CSV 파일 경로
+        max_systems: 최대 시스템 수 (None이면 전체)
+
+    Returns:
+        [(elem_A, elem_B, elem_C), ...] 형태의 리스트
+    """
+    if not os.path.exists(csv_path):
+        print(f"⚠️  CSV 파일을 찾을 수 없습니다: {csv_path}")
+        return []
+
+    print(f"📂 CSV 파일 로딩 중: {csv_path}")
+    df = pd.read_csv(csv_path)
+
+    if 'formula' not in df.columns:
+        print("⚠️  CSV 파일에 'formula' 컬럼이 없습니다.")
+        return []
+
+    # 중복 제거를 위한 set
+    element_triplets = set()
+
+    for formula in df['formula'].dropna():
+        try:
+            # Pymatgen으로 화학식 파싱
+            comp = Composition(formula)
+            elements = sorted([str(el) for el in comp.elements])
+
+            # 3원소 시스템만 추출
+            if len(elements) == 3:
+                triplet = tuple(elements)
+                element_triplets.add(triplet)
+        except:
+            continue
+
+    # set -> list 변환
+    triplets_list = list(element_triplets)
+
+    # 최대 개수 제한
+    if max_systems is not None:
+        triplets_list = triplets_list[:max_systems]
+
+    print(f"✅ 총 {len(triplets_list)}개의 3원소 시스템 발견")
+    return triplets_list
+
 # ============================================================================
 # 하나의 원소 조합에 대해 전체 파이프라인 실행
 # ============================================================================
@@ -263,9 +311,51 @@ def run_experiment_for_pair(element_A, element_B, calc, relaxer, md_sim):
     # [Step 1-2] 비율별 합금 구조 생성 및 이완
     print("\n   [Alloy Mixing] 비율별 합금 구조 생성 및 이완...")
 
-    # SimConfig에서 비율 가져오기
-    mixing_ratios = SimConfig.get_mixing_ratios()
-    print(f"   ℹ️  비율 간격: {SimConfig.MIXING_RATIO_STEP} → 총 {len(mixing_ratios)}개 비율 테스트")
+    # 조성 모드별로 비율 결정
+    if SimConfig.BINARY_COMPOSITION_MODE == "mined":
+        print(f"   🔎 조성 모드: Materials Project 마이닝")
+
+        try:
+            binary_miner = MaterialMiner(api_key=SimConfig.MP_API_KEY)
+            mined_results = binary_miner.search_metal_alloys([element_A, element_B])
+
+            if mined_results:
+                print(f"   ✅ Materials Project에서 {len(mined_results)}개 구조 발견")
+
+                # 조성 비율 추출 (element_B의 비율만 추출)
+                mixing_ratios = []
+                for item in mined_results:
+                    comp = Composition(item['formula'])
+                    elem_b_fraction = comp.get_atomic_fraction(element_B)
+                    if 0 < elem_b_fraction < 1:  # 순수 원소 제외
+                        mixing_ratios.append(round(elem_b_fraction, 3))
+
+                # 중복 제거 및 정렬
+                mixing_ratios = sorted(list(set(mixing_ratios)))
+
+                # 최대 개수 제한
+                if SimConfig.BINARY_MINING_MAX_RATIOS and len(mixing_ratios) > SimConfig.BINARY_MINING_MAX_RATIOS:
+                    mixing_ratios = mixing_ratios[:SimConfig.BINARY_MINING_MAX_RATIOS]
+                    print(f"   ℹ️  최대 비율 제한: {SimConfig.BINARY_MINING_MAX_RATIOS}개로 제한")
+
+                print(f"   ℹ️  마이닝된 비율: {mixing_ratios}")
+
+            if not mixing_ratios:
+                print(f"   ⚠️  Materials Project에서 적절한 비율을 찾지 못했습니다.")
+                print(f"   → 균등 간격 모드로 자동 전환합니다.")
+                mixing_ratios = SimConfig.get_mixing_ratios()
+
+        except Exception as e:
+            print(f"   ⚠️  마이닝 중 오류: {e}")
+            print(f"   → 균등 간격 모드로 자동 전환합니다.")
+            mixing_ratios = SimConfig.get_mixing_ratios()
+    else:
+        # 균등 간격 방식 (기존 방식)
+        print(f"   🔧 조성 모드: 균등 간격 생성")
+        mixing_ratios = SimConfig.get_mixing_ratios()
+        print(f"   ℹ️  비율 간격: {SimConfig.MIXING_RATIO_STEP} → 총 {len(mixing_ratios)}개 비율 테스트")
+
+    print(f"   ℹ️  총 비율 개수: {len(mixing_ratios)}개")
 
     if SimConfig.PARALLEL_RATIO_CALCULATION and len(mixing_ratios) > 1:
         # 병렬 처리 모드
@@ -429,9 +519,15 @@ def run_experiment_for_pair(element_A, element_B, calc, relaxer, md_sim):
             print(f"   🚀 병렬 모드 활성화 (프로세스 수: {SimConfig.MD_NUM_PROCESSES})")
             print(f"   ⚠️  Windows에서는 메모리 사용량이 높을 수 있습니다")
 
-            # 1. 작업 리스트 준비
+            # 1. 작업 리스트 준비 (순수 원소 제외)
             tasks = []
             for formula in stable_formulas:
+                # 순수 원소 필터링
+                comp = Composition(formula)
+                if len(comp.elements) == 1:
+                    print(f"   ⏭️  {formula} - 순수 원소이므로 MD 건너뜀")
+                    continue
+
                 atoms = relaxed_structures.get(formula)
                 if atoms:
                     if len(atoms) < 200:
@@ -440,40 +536,43 @@ def run_experiment_for_pair(element_A, element_B, calc, relaxer, md_sim):
                     tasks.append((formula, atoms.copy(), SimConfig.MD_TEMPERATURE, SimConfig.MD_STEPS, SimConfig.DEVICE))
 
             # 2. 프로세스 풀 생성 및 실행
-            num_processes = min(len(tasks), SimConfig.MD_NUM_PROCESSES)
-            print(f"   📋 총 {len(tasks)}개 구조에 대해 {num_processes}개 프로세스로 병렬 실행...")
+            if not tasks:
+                print(f"   ℹ️  MD를 수행할 합금 구조가 없습니다 (순수 원소만 있음)")
+            else:
+                num_processes = min(len(tasks), SimConfig.MD_NUM_PROCESSES)
+                print(f"   📋 총 {len(tasks)}개 구조에 대해 {num_processes}개 프로세스로 병렬 실행...")
 
-            with mp.Pool(processes=num_processes) as pool:
-                # 병렬 실행 시작
-                results = pool.map(md_worker, tasks)
+                with mp.Pool(processes=num_processes) as pool:
+                    # 병렬 실행 시작
+                    results = pool.map(md_worker, tasks)
 
-            # 3. 결과 수집 및 분석
-            print("\n   📊 병렬 MD 결과 분석 중...")
-            for formula, traj_file, error in results:
-                if error:
-                    print(f"   ❌ {formula} MD 실패: {error[:100]}...")
-                    continue
+                # 3. 결과 수집 및 분석
+                print("\n   📊 병렬 MD 결과 분석 중...")
+                for formula, traj_file, error in results:
+                    if error:
+                        print(f"   ❌ {formula} MD 실패: {error[:100]}...")
+                        continue
 
-                if traj_file:
-                    print(f"\n   🔹 {formula} - 결과 분석 중...")
-                    md_analyzer = MDAnalyzer(traj_file)
-                    md_results = md_analyzer.analyze()
+                    if traj_file:
+                        print(f"\n   🔹 {formula} - 결과 분석 중...")
+                        md_analyzer = MDAnalyzer(traj_file)
+                        md_results = md_analyzer.analyze()
 
-                    if "error" not in md_results:
-                        md_analyzer.print_summary(md_results)
-                        md_count += 1
-                        # 상세 데이터 업데이트
-                        for data in detailed_data:
-                            if data['formula'] == formula:
-                                data['md_performed'] = True
-                                data['md_avg_temperature'] = md_results.get('avg_temperature')
-                                data['md_temp_fluctuation'] = md_results.get('temperature_fluctuation_percent')
-                                data['md_avg_energy_per_atom'] = md_results.get('avg_energy_per_atom')
-                                data['md_volume_change_percent'] = md_results.get('volume_change_percent')
-                                data['md_thermally_stable'] = md_results.get('is_thermally_stable')
-                                break
-                    else:
-                        print(f"     ⚠️  MD 분석 오류 ({formula}): {md_results['error']}")
+                        if "error" not in md_results:
+                            md_analyzer.print_summary(md_results)
+                            md_count += 1
+                            # 상세 데이터 업데이트
+                            for data in detailed_data:
+                                if data['formula'] == formula:
+                                    data['md_performed'] = True
+                                    data['md_avg_temperature'] = md_results.get('avg_temperature')
+                                    data['md_temp_fluctuation'] = md_results.get('temperature_fluctuation_percent')
+                                    data['md_avg_energy_per_atom'] = md_results.get('avg_energy_per_atom')
+                                    data['md_volume_change_percent'] = md_results.get('volume_change_percent')
+                                    data['md_thermally_stable'] = md_results.get('is_thermally_stable')
+                                    break
+                        else:
+                            print(f"     ⚠️  MD 분석 오류 ({formula}): {md_results['error']}")
 
         # =====================================================================
         # 모드 2: 순차 처리 (Windows/안정성 우선)
@@ -484,6 +583,13 @@ def run_experiment_for_pair(element_A, element_B, calc, relaxer, md_sim):
 
             # 순차적으로 MD 실행
             for idx, formula in enumerate(stable_formulas, 1):
+                # 순수 원소 확인 (원소 개수가 1개인 경우)
+                comp = Composition(formula)
+
+                if len(comp.elements) == 1:
+                    print(f"\n   🔹 [{idx}/{len(stable_formulas)}] {formula} - ⏭️  순수 원소이므로 MD 건너뜀")
+                    continue
+
                 print(f"\n   🔹 [{idx}/{len(stable_formulas)}] {formula} - MD 시뮬레이션 시작...")
 
                 atoms = relaxed_structures.get(formula)
@@ -547,6 +653,252 @@ def run_experiment_for_pair(element_A, element_B, calc, relaxer, md_sim):
     }, detailed_data
 
 
+# ============================================================================
+# 하나의 3원소 조합에 대해 전체 파이프라인 실행
+# ============================================================================
+def run_experiment_for_triplet(element_A, element_B, element_C, calc, relaxer, md_sim):
+    """
+    하나의 3원소 조합에 대해 전체 파이프라인 실행
+
+    Returns:
+        dict: 실험 결과 요약
+        list: 상세 물성 데이터 (CSV 저장용)
+    """
+    print(f"\n{'='*70}")
+    print(f"🎯 Target System: {element_A} - {element_B} - {element_C}")
+    print(f"{'='*70}")
+
+    # StabilityAnalyzer 생성
+    analyzer = StabilityAnalyzer(stability_threshold=SimConfig.TERNARY_STABILITY_THRESHOLD)
+
+    # 상세 물성 데이터 저장용 리스트
+    detailed_data = []
+
+    # 이완된 구조 저장용 딕셔너리
+    relaxed_structures = {}
+
+    # -------------------------------------------------------------------------
+    # [Phase 1-1] 순수 원소 기준값 계산 (3개)
+    # -------------------------------------------------------------------------
+    print("\n=== [Phase 1-1] 순수 원소 기준 구조 계산 ===")
+
+    mixer = TernaryAlloyMixer(element_A, element_B, element_C)
+
+    for elem in [element_A, element_B, element_C]:
+        print(f"   🔹 {elem} 순수 구조 이완 중...")
+        try:
+            atoms = mixer.generate_pure_element_structure(
+                elem,
+                supercell_size=SimConfig.TERNARY_SUPERCELL_SIZE
+            )
+            atoms.calc = calc
+
+            relaxed, e_total = relaxer.run(atoms, save_traj=SimConfig.SAVE_RELAX_TRAJ)
+            analyzer.add_result(relaxed, e_total)
+
+            formula_full = relaxed.get_chemical_formula()
+            formula_reduced = Composition(formula_full).reduced_formula
+            relaxed_structures[formula_reduced] = relaxed.copy()
+
+            e_per_atom = e_total / len(atoms)
+            print(f"     ✓ 완료: {e_per_atom:.4f} eV/atom")
+
+        except Exception as e:
+            print(f"     ❌ 오류 발생: {e}")
+            return {"system": f"{element_A}-{element_B}-{element_C}", "error": str(e)}, []
+
+    # -------------------------------------------------------------------------
+    # [Phase 1-2] 조성별 합금 생성 및 이완
+    # -------------------------------------------------------------------------
+    print("\n=== [Phase 1-2] 조성별 합금 구조 생성 및 이완 ===")
+
+    # 조성 모드별로 비율 결정
+    if SimConfig.TERNARY_COMPOSITION_MODE == "mined":
+        print(f"   🔎 조성 모드: Materials Project 마이닝")
+
+        try:
+            ternary_miner = TernaryMaterialMiner(api_key=SimConfig.MP_API_KEY)
+            mined_results = ternary_miner.search_ternary_alloys(element_A, element_B, element_C)
+
+            ternary_miner.print_summary(mined_results)
+            compositions = ternary_miner.get_unique_ratios(mined_results)
+
+            if SimConfig.TERNARY_MINING_MAX_RATIOS and len(compositions) > SimConfig.TERNARY_MINING_MAX_RATIOS:
+                compositions = compositions[:SimConfig.TERNARY_MINING_MAX_RATIOS]
+                print(f"   ℹ️  최대 비율 제한: {SimConfig.TERNARY_MINING_MAX_RATIOS}개로 제한")
+
+            if not compositions:
+                print(f"   ⚠️  Materials Project에서 조성을 찾지 못했습니다.")
+                print(f"   → 균등 분할 모드로 자동 전환합니다.")
+                compositions = TernaryAlloyMixer.generate_composition_ratios(
+                    SimConfig.TERNARY_COMPOSITION_TOTAL
+                )
+
+        except Exception as e:
+            print(f"   ⚠️  마이닝 중 오류: {e}")
+            print(f"   → 균등 분할 모드로 자동 전환합니다.")
+            compositions = TernaryAlloyMixer.generate_composition_ratios(
+                SimConfig.TERNARY_COMPOSITION_TOTAL
+            )
+    else:
+        print(f"   🔧 조성 모드: 균등 분할 생성")
+        compositions = TernaryAlloyMixer.generate_composition_ratios(
+            SimConfig.TERNARY_COMPOSITION_TOTAL
+        )
+        print(f"   ℹ️  조성 범위: {SimConfig.TERNARY_COMPOSITION_TOTAL}")
+
+    print(f"   ℹ️  총 조성 개수: {len(compositions)}개")
+
+    for idx, ratio_tuple in enumerate(compositions, 1):
+        print(f"   [{idx}/{len(compositions)}] 조성 {ratio_tuple}: {element_A}:{element_B}:{element_C}")
+
+        try:
+            atoms = mixer.generate_ternary_structure(
+                ratio_tuple,
+                supercell_size=SimConfig.TERNARY_SUPERCELL_SIZE
+            )
+            atoms.calc = calc
+
+            relaxed, e_total = relaxer.run(atoms, save_traj=SimConfig.SAVE_RELAX_TRAJ)
+            analyzer.add_result(relaxed, e_total)
+
+            formula_full = relaxed.get_chemical_formula()
+            formula_reduced = Composition(formula_full).reduced_formula
+            relaxed_structures[formula_reduced] = relaxed.copy()
+
+            e_per_atom = e_total / len(atoms)
+            print(f"     ✓ 완료: {formula_reduced} = {e_per_atom:.4f} eV/atom")
+
+        except Exception as e:
+            print(f"     ❌ 오류 발생: {e}")
+            continue
+
+    # -------------------------------------------------------------------------
+    # [Phase 2] 안정성 필터링
+    # -------------------------------------------------------------------------
+    print("\n=== [Phase 2] 열역학적 안정성 필터링 ===")
+    print(f"   🔍 Pymatgen Convex Hull 분석 중 (임계값: {SimConfig.TERNARY_STABILITY_THRESHOLD} eV/atom)...")
+
+    results = analyzer.analyze()
+
+    if not results:
+        print("   ❌ 분석 결과가 없습니다.")
+        return {"system": f"{element_A}-{element_B}-{element_C}", "stable_count": 0}, []
+
+    stable_formulas = []
+
+    print(f"\n   {'Formula':<15} | {'E above hull':<15} | {'Status'}")
+    print("   " + "-" * 55)
+
+    for res in results:
+        formula = res['formula']
+        e_hull = res['energy_above_hull']
+        is_stable = res['is_stable']
+
+        if is_stable:
+            status = "✅ 안정 (MD 대상)"
+            stable_formulas.append(formula)
+        else:
+            status = "❌ 불안정 (Skip)"
+
+        print(f"   {formula:<15} | {e_hull:.6f} eV/atom | {status}")
+
+        # 상세 데이터 수집
+        atoms_data = relaxed_structures.get(formula)
+        if atoms_data:
+            lattice = atoms_data.get_cell()
+            lattice_a = lattice[0][0]
+            volume = atoms_data.get_volume()
+            mass = sum(atoms_data.get_masses())
+            density = mass / volume * 1.66054
+
+            detailed_data.append({
+                'system': f"{element_A}-{element_B}-{element_C}",
+                'formula': formula,
+                'total_atoms': len(atoms_data),
+                'lattice_a': round(lattice_a, 4),
+                'density': round(density, 4),
+                'energy_per_atom': atoms_data.get_potential_energy() / len(atoms_data) if atoms_data.calc else None,
+                'energy_above_hull': e_hull,
+                'is_stable': is_stable,
+                'md_performed': False
+            })
+
+    print(f"\n   📊 필터링 결과: 총 {len(stable_formulas)}개 안정 구조 발견")
+
+    # -------------------------------------------------------------------------
+    # [Phase 3] MD 시뮬레이션 (합금만, 순수 원소 제외)
+    # -------------------------------------------------------------------------
+    print(f"\n=== [Phase 3] MD 시뮬레이션 ===")
+
+    md_count = 0
+    if not stable_formulas:
+        print("   ℹ️  안정한 구조가 없어 MD를 건너뜁니다.")
+    else:
+        for idx, formula in enumerate(stable_formulas, 1):
+            # 순수 원소 확인 (원소 개수가 1개인 경우)
+            comp = Composition(formula)
+
+            if len(comp.elements) == 1:
+                print(f"\n   🔹 [{idx}/{len(stable_formulas)}] {formula} - ⏭️  순수 원소이므로 MD 건너뜀")
+                continue
+
+            print(f"\n   🔹 [{idx}/{len(stable_formulas)}] {formula} - MD 시뮬레이션 시작...")
+
+            atoms = relaxed_structures.get(formula)
+            if not atoms:
+                print(f"     ⚠️  구조를 찾을 수 없습니다. 건너뜁니다.")
+                continue
+
+            try:
+                if len(atoms) < 200:
+                    print(f"     ℹ️  구조가 작아서 2x2x2로 확장합니다 ({len(atoms)} -> {len(atoms)*8} atoms)")
+                    atoms = atoms * (2, 2, 2)
+
+                final_atoms, traj_file = md_sim.run(
+                    atoms,
+                    temperature=SimConfig.MD_TEMPERATURE,
+                    steps=SimConfig.MD_STEPS,
+                    save_interval=50
+                )
+
+                if traj_file:
+                    md_analyzer = MDAnalyzer(traj_file)
+                    md_results = md_analyzer.analyze()
+
+                    if "error" not in md_results:
+                        md_analyzer.print_summary(md_results)
+                        md_count += 1
+
+                        for data in detailed_data:
+                            if data['formula'] == formula:
+                                data['md_performed'] = True
+                                data['md_avg_temperature'] = md_results.get('avg_temperature')
+                                data['md_temp_fluctuation'] = md_results.get('temperature_fluctuation_percent')
+                                data['md_avg_energy_per_atom'] = md_results.get('avg_energy_per_atom')
+                                data['md_volume_change_percent'] = md_results.get('volume_change_percent')
+                                data['md_thermally_stable'] = md_results.get('is_thermally_stable')
+                                break
+
+                        print(f"     ✅ MD 완료 및 분석 성공")
+                    else:
+                        print(f"     ⚠️  MD 분석 오류: {md_results['error']}")
+                else:
+                    print(f"     ⚠️  Trajectory 파일이 생성되지 않았습니다.")
+
+            except Exception as e:
+                print(f"     ❌ MD 실행 중 오류: {e}")
+                import traceback
+                print(f"     상세: {traceback.format_exc()[:200]}")
+                continue
+
+    return {
+        "system": f"{element_A}-{element_B}-{element_C}",
+        "total_structures": len(relaxed_structures),
+        "stable_count": len(stable_formulas),
+        "md_count": md_count
+    }, detailed_data
+
 
 
 # ============================================================================
@@ -603,12 +955,27 @@ def main():
 
     print(f"\n⚙️  설정 로딩:")
     print(f"   - 파이프라인 모드: {SimConfig.PIPELINE_MODE}")
+    print(f"   - 3원소 합금 모드: {'ON' if SimConfig.ENABLE_TERNARY_ALLOY else 'OFF'}")
     print(f"   - Resume 모드: {'ON (완료된 시스템 건너뛰기)' if SimConfig.RESUME_MODE else 'OFF'}")
     print(f"   - CSV 경로: {SimConfig.MINER_CSV_PATH}")
     print(f"   - 최대 시스템 수: {SimConfig.MAX_SYSTEMS}")
+
+    # 2원소 설정
+    print(f"\n   [2원소 설정]")
+    print(f"   - 조성 모드: {SimConfig.BINARY_COMPOSITION_MODE}")
     print(f"   - 혼합 비율 간격: {SimConfig.MIXING_RATIO_STEP} ({len(SimConfig.get_mixing_ratios())}개 비율)")
     print(f"   - 슈퍼셀 크기: {SimConfig.SUPERCELL_SIZE}")
     print(f"   - 안정성 임계값: {SimConfig.STABILITY_THRESHOLD} eV/atom")
+
+    # 3원소 설정 (활성화된 경우만 출력)
+    if SimConfig.ENABLE_TERNARY_ALLOY:
+        print(f"\n   [3원소 설정]")
+        print(f"   - 조성 모드: {SimConfig.TERNARY_COMPOSITION_MODE}")
+        print(f"   - 조성 총합 범위: {SimConfig.TERNARY_COMPOSITION_TOTAL}")
+        print(f"   - 슈퍼셀 크기: {SimConfig.TERNARY_SUPERCELL_SIZE}")
+        print(f"   - 안정성 임계값: {SimConfig.TERNARY_STABILITY_THRESHOLD} eV/atom")
+
+    print(f"\n   [공통 설정]")
     print(f"   - MD 온도: {SimConfig.MD_TEMPERATURE} K")
     print(f"   - 디바이스: {SimConfig.DEVICE}")
 
@@ -618,23 +985,45 @@ def main():
     md_sim = MDSimulator(calculator=calc)
 
     # -------------------------------------------------------------------------
-    # 2. 원소 조합 로딩 (auto 모드 vs manual 모드)
+    # 2. 원소 조합 로딩 (auto 모드 vs manual 모드, 2원소 vs 3원소)
     # -------------------------------------------------------------------------
+    element_pairs = []
+    element_triplets = []
+
     if SimConfig.PIPELINE_MODE == "auto":
         print(f"\n📂 AUTO 모드: CSV에서 원소 조합 자동 로드")
+
+        # 2원소 시스템 로드
         element_pairs = load_element_pairs_from_csv(
             SimConfig.MINER_CSV_PATH,
             max_systems=SimConfig.MAX_SYSTEMS
         )
 
-        if not element_pairs:
+        # 3원소 시스템 로드 (활성화된 경우만)
+        if SimConfig.ENABLE_TERNARY_ALLOY:
+            element_triplets = load_element_triplets_from_csv(
+                SimConfig.MINER_CSV_PATH,
+                max_systems=SimConfig.MAX_SYSTEMS
+            )
+
+        if not element_pairs and not element_triplets:
             print("❌ 원소 조합을 찾을 수 없습니다. 프로그램을 종료합니다.")
             return
 
+        print(f"   - 2원소 시스템: {len(element_pairs)}개")
+        if SimConfig.ENABLE_TERNARY_ALLOY:
+            print(f"   - 3원소 시스템: {len(element_triplets)}개")
+
     elif SimConfig.PIPELINE_MODE == "manual":
         print(f"\n✋ MANUAL 모드: 수동 지정 원소 사용")
-        element_pairs = [(SimConfig.MANUAL_ELEMENT_A, SimConfig.MANUAL_ELEMENT_B)]
-        print(f"   - 원소 조합: {element_pairs[0]}")
+
+        # 3원소 모드 확인
+        if SimConfig.ENABLE_TERNARY_ALLOY:
+            element_triplets = [(SimConfig.MANUAL_ELEMENT_A, SimConfig.MANUAL_ELEMENT_B, SimConfig.MANUAL_ELEMENT_C)]
+            print(f"   - 3원소 조합: {element_triplets[0]}")
+        else:
+            element_pairs = [(SimConfig.MANUAL_ELEMENT_A, SimConfig.MANUAL_ELEMENT_B)]
+            print(f"   - 2원소 조합: {element_pairs[0]}")
 
     else:
         print(f"❌ 알 수 없는 PIPELINE_MODE: {SimConfig.PIPELINE_MODE}")
@@ -643,7 +1032,12 @@ def main():
     # -------------------------------------------------------------------------
     # 3. 각 원소 조합에 대해 파이프라인 실행
     # -------------------------------------------------------------------------
-    print(f"\n🚀 총 {len(element_pairs)}개 시스템에 대해 파이프라인 실행 시작")
+    total_systems = len(element_pairs) + len(element_triplets)
+    print(f"\n🚀 총 {total_systems}개 시스템에 대해 파이프라인 실행 시작")
+    if element_pairs:
+        print(f"   - 2원소 시스템: {len(element_pairs)}개")
+    if element_triplets:
+        print(f"   - 3원소 시스템: {len(element_triplets)}개")
 
     # 병렬처리 설정 출력
     print(f"\n⚙️  병렬처리 설정:")
@@ -667,21 +1061,54 @@ def main():
         print("⚠️  주의: 이 모드는 복잡하므로 개발 중입니다. 현재는 순차 실행합니다.\n")
         # TODO: 실제 멀티프로세싱 구현 (복잡도가 높아 일단 순차 실행)
 
+        system_counter = 0
+
+        # 2원소 시스템 처리
         for idx, (elem_A, elem_B) in enumerate(element_pairs, 1):
+            system_counter += 1
             system_name = f"{elem_A}-{elem_B}"
 
             # Resume 모드: 이미 완료된 시스템은 건너뛰기
             if system_name in completed_systems:
                 print(f"\n{'#'*70}")
-                print(f"# [{idx}/{len(element_pairs)}] {system_name} - ⏭️  이미 완료됨 (건너뛰기)")
+                print(f"# [{system_counter}/{total_systems}] {system_name} - ⏭️  이미 완료됨 (건너뛰기)")
                 print(f"{'#'*70}")
                 continue
 
             print(f"\n{'#'*70}")
-            print(f"# [{idx}/{len(element_pairs)}] 시스템 실행 중")
+            print(f"# [{system_counter}/{total_systems}] 2원소 시스템 실행 중")
             print(f"{'#'*70}")
 
             result, detailed_data = run_experiment_for_pair(elem_A, elem_B, calc, relaxer, md_sim)
+            all_results.append(result)
+            all_detailed_data.extend(detailed_data)
+
+            print(f"\n   ✅ {result['system']} 완료")
+            if 'error' not in result:
+                print(f"      - 총 구조: {result['total_structures']}개")
+                print(f"      - 안정 구조: {result['stable_count']}개")
+                print(f"      - MD 완료: {result['md_count']}개")
+
+            # 중간 저장 (시스템 하나 끝날 때마다)
+            save_intermediate_csv(csv_filename, all_detailed_data)
+
+        # 3원소 시스템 처리
+        for idx, (elem_A, elem_B, elem_C) in enumerate(element_triplets, 1):
+            system_counter += 1
+            system_name = f"{elem_A}-{elem_B}-{elem_C}"
+
+            # Resume 모드: 이미 완료된 시스템은 건너뛰기
+            if system_name in completed_systems:
+                print(f"\n{'#'*70}")
+                print(f"# [{system_counter}/{total_systems}] {system_name} - ⏭️  이미 완료됨 (건너뛰기)")
+                print(f"{'#'*70}")
+                continue
+
+            print(f"\n{'#'*70}")
+            print(f"# [{system_counter}/{total_systems}] 3원소 시스템 실행 중")
+            print(f"{'#'*70}")
+
+            result, detailed_data = run_experiment_for_triplet(elem_A, elem_B, elem_C, calc, relaxer, md_sim)
             all_results.append(result)
             all_detailed_data.extend(detailed_data)
 
@@ -698,22 +1125,56 @@ def main():
         # 순차 처리 (기본)
         print(f"ℹ️  순차 모드: 시스템을 하나씩 처리합니다.\n")
 
+        system_counter = 0
+
+        # 2원소 시스템 처리
         for idx, (elem_A, elem_B) in enumerate(element_pairs, 1):
+            system_counter += 1
             system_name = f"{elem_A}-{elem_B}"
 
             # Resume 모드: 이미 완료된 시스템은 건너뛰기
             if system_name in completed_systems:
                 print(f"\n{'#'*70}")
-                print(f"# [{idx}/{len(element_pairs)}] {system_name} - ⏭️  이미 완료됨 (건너뛰기)")
+                print(f"# [{system_counter}/{total_systems}] {system_name} - ⏭️  이미 완료됨 (건너뛰기)")
                 print(f"{'#'*70}")
                 continue
 
             print(f"\n{'#'*70}")
-            print(f"# [{idx}/{len(element_pairs)}] 시스템 실행 중")
+            print(f"# [{system_counter}/{total_systems}] 2원소 시스템 실행 중")
             print(f"{'#'*70}")
 
             # 하나의 원소 조합에 대해 전체 파이프라인 실행
             result, detailed_data = run_experiment_for_pair(elem_A, elem_B, calc, relaxer, md_sim)
+            all_results.append(result)
+            all_detailed_data.extend(detailed_data)  # 상세 데이터 추가
+
+            print(f"\n   ✅ {result['system']} 완료")
+            if 'error' not in result:
+                print(f"      - 총 구조: {result['total_structures']}개")
+                print(f"      - 안정 구조: {result['stable_count']}개")
+                print(f"      - MD 완료: {result['md_count']}개")
+
+            # 중간 저장 (시스템 하나 끝날 때마다)
+            save_intermediate_csv(csv_filename, all_detailed_data)
+
+        # 3원소 시스템 처리
+        for idx, (elem_A, elem_B, elem_C) in enumerate(element_triplets, 1):
+            system_counter += 1
+            system_name = f"{elem_A}-{elem_B}-{elem_C}"
+
+            # Resume 모드: 이미 완료된 시스템은 건너뛰기
+            if system_name in completed_systems:
+                print(f"\n{'#'*70}")
+                print(f"# [{system_counter}/{total_systems}] {system_name} - ⏭️  이미 완료됨 (건너뛰기)")
+                print(f"{'#'*70}")
+                continue
+
+            print(f"\n{'#'*70}")
+            print(f"# [{system_counter}/{total_systems}] 3원소 시스템 실행 중")
+            print(f"{'#'*70}")
+
+            # 하나의 원소 조합에 대해 전체 파이프라인 실행
+            result, detailed_data = run_experiment_for_triplet(elem_A, elem_B, elem_C, calc, relaxer, md_sim)
             all_results.append(result)
             all_detailed_data.extend(detailed_data)  # 상세 데이터 추가
 
